@@ -19,6 +19,10 @@
     #coords { font-size: 0.95rem; margin-left: auto; }
     .volver { color: #1a1a1a; text-decoration: none; padding: 6px 10px; border: 1px solid #c8c8c8; border-radius: 4px; font-size: 0.95rem; }
     .volver:hover { background: #f4f4f4; }
+    .boton { padding: 6px 10px; border: 1px solid #c8c8c8; border-radius: 4px; background: #fff; font-size: 0.95rem; cursor: pointer; }
+    .boton:hover { background: #f4f4f4; }
+    #slider { flex: 1; min-width: 160px; max-width: 520px; }
+    #etiqueta { min-width: 5.5em; font-variant-numeric: tabular-nums; }
 
     #mapa { flex: 1; min-height: 0; }
     .leyenda { background: #fff; padding: 6px; border: 1px solid #c8c8c8; border-radius: 4px; }
@@ -30,9 +34,9 @@
 
   <div class="barra">
     <a href="index.html" class="volver">&larr; Inicio</a>
-    <label>Mes:
-      <input type="month" id="mes" min="2000-03" max="2026-10" value="2026-10">
-    </label>
+    <button type="button" id="play" class="boton" aria-label="Reproducir">&#9654; Reproducir</button>
+    <input type="range" id="slider" min="0" max="0" value="0" aria-label="Mes">
+    <strong id="etiqueta">--</strong>
     <span id="coords">Haz clic en el mapa para ver coordenadas.</span>
   </div>
 
@@ -63,9 +67,52 @@
       attribution: 'NASA GIBS / MODIS Terra LST'
     }).addTo(mapa);
 
-    document.getElementById('mes').addEventListener('change', (e) => {
-      if (!e.target.value) return;
-      capaTemp.setUrl(urlCapa(e.target.value));
+    // Serie temporal mensual (según el catálogo de GIBS: 2000-03 a 2026-10)
+    const INICIO = { y: 2000, m: 3 };
+    const FIN = { y: 2026, m: 10 };
+    const maxIndice = (FIN.y - INICIO.y) * 12 + (FIN.m - INICIO.m);
+
+    function mesDeIndice(i) {
+      const n = INICIO.m - 1 + i;
+      const y = INICIO.y + Math.floor(n / 12);
+      const m = (n % 12) + 1;
+      return `${y}-${String(m).padStart(2, '0')}`;
+    }
+
+    const slider = document.getElementById('slider');
+    const etiqueta = document.getElementById('etiqueta');
+    const botonPlay = document.getElementById('play');
+    slider.max = maxIndice;
+    slider.value = maxIndice;
+    etiqueta.textContent = mesDeIndice(maxIndice);
+
+    let espera = null;
+    function mostrar(i) {
+      const mes = mesDeIndice(i);
+      etiqueta.textContent = mes;
+      clearTimeout(espera);
+      espera = setTimeout(() => capaTemp.setUrl(urlCapa(mes)), 150); // evita pedir teselas en cada pixel
+    }
+
+    slider.addEventListener('input', () => mostrar(Number(slider.value)));
+
+    // Reproducción automática
+    let timer = null;
+    function parar() {
+      clearInterval(timer);
+      timer = null;
+      botonPlay.innerHTML = '&#9654; Reproducir';
+    }
+    botonPlay.addEventListener('click', () => {
+      if (timer) { parar(); return; }
+      botonPlay.innerHTML = '&#10074;&#10074; Pausar';
+      if (Number(slider.value) >= maxIndice) slider.value = 0;
+      timer = setInterval(() => {
+        const sig = Number(slider.value) + 1;
+        if (sig > maxIndice) { parar(); return; }
+        slider.value = sig;
+        mostrar(sig);
+      }, 1200);
     });
 
     // Leyenda oficial de GIBS
