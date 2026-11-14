@@ -10,6 +10,7 @@
   --fondo: #ffffff;
   --fondo-alt: #f4f4f4;
   --texto: #1a1a1a;
+  --espacio: #0b0f1a;
 }
 
 html, body {
@@ -82,18 +83,35 @@ body {
   background: #e8e8e8;
 }
 
-/* Columna derecha: marcador del modelo 3D */
+/* Columna derecha: globo 3D + panel de información */
 .columna-derecha {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 16px;
+  padding: 16px;
 }
 
 .globo {
-  width: min(70%, 70vh);
+  width: min(80%, 62vh);
   aspect-ratio: 1 / 1;
-  border: 2px dashed var(--borde);
   border-radius: 50%;
+  overflow: hidden;
+  background: var(--espacio);
+  border: 1px solid var(--borde);
+  cursor: crosshair;
+}
+
+.info {
+  width: min(80%, 480px);
+  min-height: 5.5em;
+  padding: 10px 12px;
+  border: 1px solid var(--borde);
+  border-radius: 4px;
+  background: var(--fondo-alt);
+  font-size: 0.95rem;
+  line-height: 1.5;
 }
 
 /* Pantallas pequeñas: una sola columna */
@@ -112,7 +130,7 @@ body {
     min-height: 80px;
   }
 
-  .columna-derecha {
-    padding: 24px 0;
+  .globo {
+    width: min(90%, 420px);
   }
 }
