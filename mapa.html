@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mapa de temperatura superficial</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #1a1a1a; }
+    body { display: flex; flex-direction: column; }
+
+    .barra {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 16px;
+      padding: 10px 16px; border-bottom: 1px solid #c8c8c8; background: #fff;
+    }
+    .barra label { font-size: 0.95rem; }
+    .barra input[type="month"] { padding: 6px 8px; border: 1px solid #c8c8c8; border-radius: 4px; font-size: 1rem; }
+    #coords { font-size: 0.95rem; margin-left: auto; }
+    .volver { color: #1a1a1a; text-decoration: none; padding: 6px 10px; border: 1px solid #c8c8c8; border-radius: 4px; font-size: 0.95rem; }
+    .volver:hover { background: #f4f4f4; }
+
+    #mapa { flex: 1; min-height: 0; }
+    .leyenda { background: #fff; padding: 6px; border: 1px solid #c8c8c8; border-radius: 4px; }
+    .leyenda img { display: block; height: 220px; }
+    .leyenda small { display: block; font-size: 11px; margin-top: 4px; max-width: 135px; }
+  </style>
+</head>
+<body>
+
+  <div class="barra">
+    <a href="index.html" class="volver">&larr; Inicio</a>
+    <label>Mes:
+      <input type="month" id="mes" min="2000-03" max="2026-10" value="2026-10">
+    </label>
+    <span id="coords">Haz clic en el mapa para ver coordenadas.</span>
+  </div>
+
+  <div id="mapa"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const CAPA = 'MODIS_Terra_L3_Land_Surface_Temp_Monthly_Day';
+    const MATRIZ = 'GoogleMapsCompatible_Level6';
+    const BASE = 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best';
+
+    const mapa = L.map('mapa').setView([13.7, -88.9], 5);
+
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 18,
+      attribution: '&copy; OpenStreetMap'
+    }).addTo(mapa);
+
+    function urlCapa(mes) {
+      return `${BASE}/${CAPA}/default/${mes}-01/${MATRIZ}/{z}/{y}/{x}.png`;
+    }
+
+    // Capa de temperatura (zoom nativo hasta 6; más allá se amplía la imagen)
+    let capaTemp = L.tileLayer(urlCapa('2026-10'), {
+      maxNativeZoom: 6,
+      maxZoom: 12,
+      opacity: 0.75,
+      attribution: 'NASA GIBS / MODIS Terra LST'
+    }).addTo(mapa);
+
+    document.getElementById('mes').addEventListener('change', (e) => {
+      if (!e.target.value) return;
+      capaTemp.setUrl(urlCapa(e.target.value));
+    });
+
+    // Leyenda oficial de GIBS
+    const leyenda = L.control({ position: 'bottomright' });
+    leyenda.onAdd = function () {
+      const div = L.DomUtil.create('div', 'leyenda');
+      div.innerHTML =
+        '<img src="https://gibs.earthdata.nasa.gov/legends/MODIS_Land_Surface_Temp_V.svg" alt="Leyenda de temperatura">' +
+        '<small>Temperatura superficial (promedio mensual, diurna)</small>';
+      return div;
+    };
+    leyenda.addTo(mapa);
+
+    // Coordenadas al hacer clic
+    let marcador = null;
+    mapa.on('click', (e) => {
+      const { lat, lng } = e.latlng;
+      document.getElementById('coords').textContent =
+        `Lat: ${lat.toFixed(4)}°, Lon: ${lng.toFixed(4)}°`;
+      if (marcador) marcador.remove();
+      marcador = L.circleMarker([lat, lng], { radius: 6, color: '#d32f2f' }).addTo(mapa);
+    });
+  </script>
+</body>
+</html>
