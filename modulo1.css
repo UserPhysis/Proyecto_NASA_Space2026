@@ -1,0 +1,245 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --borde: #c8c8c8;
+  --fondo: #ffffff;
+  --fondo-alt: #f4f4f4;
+  --texto: #1a1a1a;
+  --acento: #1f3a5f;
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--fondo);
+  color: var(--texto);
+  display: flex;
+  flex-direction: column;
+}
+
+/* Encabezado */
+.header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--borde);
+}
+
+.header h1 {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+#coords {
+  margin-left: auto;
+  font-size: 0.95rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.volver {
+  color: var(--texto);
+  text-decoration: none;
+  padding: 6px 10px;
+  border: 1px solid var(--borde);
+  border-radius: 4px;
+  font-size: 0.95rem;
+}
+
+.volver:hover {
+  background: var(--fondo-alt);
+}
+
+/* Dos columnas: menú | vista */
+.contenido {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 300px 1fr;
+}
+
+/* Menú */
+.menu {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border-right: 1px solid var(--borde);
+  overflow-y: auto;
+}
+
+.menu-titulo {
+  margin-top: 8px;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #666;
+}
+
+.menu-titulo:first-child {
+  margin-top: 0;
+}
+
+.opcion {
+  padding: 14px 12px;
+  text-align: left;
+  font-size: 1rem;
+  color: var(--texto);
+  background: var(--fondo-alt);
+  border: 1px solid var(--borde);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.opcion:hover {
+  background: #e8e8e8;
+}
+
+.opcion.activa {
+  background: var(--acento);
+  border-color: var(--acento);
+  color: #fff;
+}
+
+.descripcion {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--borde);
+  border-radius: 4px;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.descripcion small {
+  display: block;
+  margin-top: 6px;
+  color: #666;
+}
+
+/* Vista derecha */
+.vista {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.vista-mapa {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+#mapa {
+  flex: 1;
+  min-height: 0;
+}
+
+.tiempo {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--borde);
+}
+
+#slider {
+  flex: 1;
+  min-width: 120px;
+}
+
+#etiqueta {
+  min-width: 6.5em;
+  font-variant-numeric: tabular-nums;
+}
+
+.boton {
+  padding: 6px 10px;
+  border: 1px solid var(--borde);
+  border-radius: 4px;
+  background: var(--fondo);
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.boton:hover {
+  background: var(--fondo-alt);
+}
+
+.leyenda {
+  background: #fff;
+  padding: 6px;
+  border: 1px solid var(--borde);
+  border-radius: 4px;
+}
+
+.leyenda img {
+  display: block;
+  height: 200px;
+  width: auto;
+}
+
+/* Vista de gráfica */
+.vista-grafica {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+
+.vista-grafica[hidden] {
+  display: none;
+}
+
+.vista-grafica h2 {
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.lienzo {
+  position: relative;
+  flex: 1;
+  min-height: 260px;
+}
+
+.nota {
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: #444;
+}
+
+/* Pantallas pequeñas */
+@media (max-width: 800px) {
+  .contenido {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  .menu {
+    flex-direction: row;
+    flex-wrap: wrap;
+    border-right: none;
+    border-bottom: 1px solid var(--borde);
+  }
+
+  .menu-titulo,
+  .descripcion {
+    width: 100%;
+  }
+
+  #mapa {
+    min-height: 360px;
+  }
+}
