@@ -33,6 +33,71 @@ const legends: Record<LayerId, { min: string; max: string; unit: string; descrip
   soil: { min: "Low", max: "High", unit: "clay", description: "Soil texture proxy", tone: "soil" },
 };
 
+// ==========================================
+// MOTOR DE RECOMENDACIÓN DE CULTIVOS INTEGRADO
+// ==========================================
+export type Range = [number, number, number, number];
+export type Crop = { id: string; name: string; temp: Range; rain: Range; alt: Range; ph: Range; clay?: Range; dryMax: number };
+
+export const CROPS: Crop[] = [
+  { id: "maize", name: "Maize", temp: [10, 18, 27, 35], rain: [400, 600, 1200, 2500], alt: [0, 0, 2000, 3000], ph: [5, 5.8, 7, 8], dryMax: 5 },
+  { id: "beans", name: "Beans", temp: [8, 16, 24, 30], rain: [300, 500, 1500, 2500], alt: [0, 0, 2000, 3000], ph: [4.5, 5.5, 7, 8], dryMax: 6 },
+  { id: "coffee", name: "Coffee (arabica)", temp: [12, 18, 22, 28], rain: [900, 1400, 2200, 3000], alt: [400, 800, 1800, 2400], ph: [4.5, 5.5, 6.5, 7.5], clay: [5, 15, 45, 70], dryMax: 4 },
+  { id: "rice", name: "Rice", temp: [15, 22, 30, 36], rain: [900, 1200, 2500, 4000], alt: [0, 0, 800, 2000], ph: [4.5, 5.5, 7, 8.5], clay: [10, 25, 60, 90], dryMax: 2 },
+  { id: "sugarcane", name: "Sugarcane", temp: [15, 22, 32, 38], rain: [1000, 1200, 2200, 3500], alt: [0, 0, 1200, 2000], ph: [5, 5.5, 7.5, 8.5], dryMax: 4 },
+  { id: "tomato", name: "Tomato", temp: [10, 18, 26, 32], rain: [400, 600, 1400, 2500], alt: [0, 0, 1800, 2800], ph: [5, 5.8, 7, 8], dryMax: 5 },
+  { id: "potato", name: "Potato", temp: [5, 10, 18, 25], rain: [400, 600, 1200, 2000], alt: [0, 500, 3000, 4000], ph: [4.5, 5.2, 6.5, 7.5], clay: [0, 5, 25, 45], dryMax: 4 },
+  { id: "wheat", name: "Wheat", temp: [3, 10, 20, 28], rain: [250, 400, 900, 1800], alt: [0, 0, 2500, 3500], ph: [5, 5.8, 7.5, 8.5], dryMax: 6 },
+  { id: "cassava", name: "Cassava", temp: [14, 20, 30, 36], rain: [500, 800, 1800, 3000], alt: [0, 0, 1200, 2000], ph: [4.5, 5.5, 7, 8.5], clay: [0, 5, 35, 60], dryMax: 6 },
+  { id: "banana", name: "Banana", temp: [15, 22, 30, 35], rain: [1000, 1500, 2500, 4000], alt: [0, 0, 1000, 1800], ph: [4.5, 5.5, 7, 8], dryMax: 2 },
+  { id: "cocoa", name: "Cocoa", temp: [18, 22, 28, 32], rain: [1000, 1500, 2500, 4000], alt: [0, 0, 700, 1400], ph: [4.5, 5.5, 7, 8], dryMax: 2 },
+  { id: "sorghum", name: "Sorghum", temp: [10, 20, 32, 40], rain: [300, 450, 1000, 1800], alt: [0, 0, 1800, 2500], ph: [5, 5.5, 7.5, 8.5], dryMax: 7 },
+  { id: "soybean", name: "Soybean", temp: [10, 18, 28, 35], rain: [400, 600, 1200, 2000], alt: [0, 0, 1500, 2500], ph: [5, 5.8, 7, 8], dryMax: 5 },
+];
+
+export type Inputs = { tMean: number; rain: number; altitude: number | null; ph: number | null; clay: number | null; dryMonths: number };
+export type Factor = { key: string; v: number; dir: "" | "low" | "high" };
+export type CropResult = { id: string; name: string; score: number; sd: number; verdict: string; factors: Factor[]; limiting: string };
+
+const mean = (a: number[]) => a.reduce((x, y) => x + y, 0) / Math.max(a.length, 1);
+const sd = (a: number[]) => { const m = mean(a); return Math.sqrt(mean(a.map((v) => (v - m) ** 2))); };
+const trap = (x: number, [a, b, c, d]: Range) => (x >= b && x <= c ? 1 : x <= a || x >= d ? 0 : x < b ? (x - a) / (b - a) : (d - x) / (d - c));
+
+function scoreCrop(c: Crop, inp: Inputs, dT = 0, dR = 1) {
+  const factors: (Factor & { w: number })[] = [];
+  const add = (key: string, w: number, range: Range, x: number) => factors.push({ key, w, v: trap(x, range), dir: x < range[1] ? "low" : x > range[2] ? "high" : "" });
+  add("temperature", 3, c.temp, inp.tMean + dT);
+  add("rainfall", 3, c.rain, inp.rain * dR);
+  if (inp.altitude !== null) add("altitude", 2, c.alt, Math.max(0, inp.altitude));
+  if (inp.ph !== null) add("soil pH", 1.5, c.ph, inp.ph);
+  if (inp.clay !== null && c.clay) add("soil texture", 1, c.clay, inp.clay);
+  const over = Math.max(0, inp.dryMonths - c.dryMax);
+  factors.push({ key: "dry season", w: 2, v: Math.max(0, 1 - over * 0.25), dir: over ? "high" : "" });
+  const hardZero = factors.some((f) => ["temperature", "rainfall", "altitude"].includes(f.key) && f.v === 0);
+  const wsum = factors.reduce((a, f) => a + f.w, 0);
+  const geo = Math.exp(factors.reduce((a, f) => a + f.w * Math.log(Math.max(f.v, 0.05)), 0) / wsum);
+  const weakest = Math.min(...factors.map((f) => f.v));
+  return { score: hardZero ? 0 : (0.6 * geo + 0.4 * weakest) * 100, factors };
+}
+
+const WORDS: Record<string, [string, string]> = {
+  temperature: ["too cold", "too hot"], rainfall: ["too dry", "too wet"], altitude: ["too low", "too high"],
+  "soil pH": ["too acidic", "too alkaline"], "soil texture": ["too sandy", "too clayey"], "dry season": ["", "too long"],
+};
+export const verdictOf = (s: number) => (s >= 80 ? "Excellent" : s >= 60 ? "Good" : s >= 40 ? "Marginal" : s > 0 ? "Poor" : "Not viable");
+
+export function evaluateCrops(inp: Inputs): CropResult[] {
+  return CROPS.map((c) => {
+    const base = scoreCrop(c, inp);
+    const runs = [-1, 0, 1].flatMap((dT) => [0.85, 1, 1.15].map((dR) => scoreCrop(c, inp, dT, dR).score));
+    const score = Math.round(mean(runs));
+    const worst = [...base.factors].sort((a, b) => a.v - b.v)[0];
+    const limiting = worst.v < 0.8 ? `${worst.key} ${(WORDS[worst.key] ?? ["low", "high"])[worst.dir === "low" ? 0 : 1] || "limits it"}` : "no major limit";
+    return { id: c.id, name: c.name, score, sd: Math.round(sd(runs)), verdict: verdictOf(score), factors: base.factors.map(({ key, v, dir }) => ({ key, v, dir })), limiting };
+  }).sort((a, b) => b.score - a.score);
+}
+// ==========================================
+
 function normalize(value: number, min: number, max: number) { return Math.max(0, Math.min(100, Math.round(((value - min) / (max - min)) * 100))); }
 function getMetrics(environment: Environment) {
   const { temperature: temp, rainfall: rain, humidity } = environment;
@@ -42,28 +107,14 @@ function getMetrics(environment: Environment) {
     ["heat", "Heat stress", heat > 72 ? "High" : heat > 45 ? "Medium" : "Low", heat, "red", "Heat exposure risk"],
     ["rain", "Rainfall", `${rain.toFixed(0)} mm`, rainScore, "blue", "30-day accumulation"],
     ["soil", "Soil moisture", `${moisture}%`, moisture, "green", "Satellite-informed proxy"],
-    ["evaporation", "Evaporation", `${(3.4 + temp * .08).toFixed(1)} mm/day`, normalize(temp, 10, 35), "amber", "Atmospheric demand"],
+    ["evaporation", "Evaporation", `${(3.4 + temp * 0.08).toFixed(1)} mm/day`, normalize(temp, 10, 35), "amber", "Atmospheric demand"],
     ["frost", "Frost risk", temp < 12 ? "High" : temp < 17 ? "Medium" : "Low", 100 - normalize(temp, 4, 24), "violet", "Estimated minimum temperature"],
     ["extreme-rain", "Extreme rainfall", rain > 180 ? "High" : "Low", normalize(rain, 60, 260), "cyan", "Intense event signal"],
     ["vegetation", "Vegetation stress", moisture < 35 ? "Medium" : "Low", 100 - moisture, "green", "Water availability proxy"],
     ["altitude", "Altitude", environment.altitude === null ? "—" : `${Math.round(environment.altitude)} m`, normalize(environment.altitude ?? 0, 0, 3000), "green", "Elevation above sea level"],
   ];
 }
-function recommendations({ temperature: temp, rainfall: rain, humidity, soilPh, clay }: Environment) {
-  if (temp < 5) return [{ name: "No conventional crop", stars: 0, reason: "Temperature is below the practical range for the available crop rules.", rotation: "Protect soil with a cold-climate cover strategy and verify local conditions." }];
-  const soilPenalty = soilPh !== null && (soilPh < 5 || soilPh > 8) ? 1 : 0;
-  const clayPenalty = clay !== null && clay > 60 ? 1 : 0;
-  const beans = temp >= 12 && temp <= 30 && rain >= 45 ? Math.max(0, Math.min(5, 2 + (rain >= 90 ? 1 : 0) + (humidity >= 50 ? 1 : 0) + (soilPh !== null && soilPh >= 5.5 && soilPh <= 7.5 ? 1 : 0) - soilPenalty)) : 0;
-  const coffee = temp >= 18 && temp <= 25 && rain >= 100 ? Math.max(0, 5 - soilPenalty - clayPenalty) : 0;
-  const maize = temp >= 18 && temp <= 32 && rain >= 70 ? Math.max(0, 3 + (rain >= 100 ? 1 : 0) + (soilPh !== null && soilPh >= 5.5 && soilPh <= 7.5 ? 1 : 0) - soilPenalty) : 0;
-  return [
-    { name: "Beans", stars: beans, reason: beans ? `Fits the observed ${temp.toFixed(1)} °C, ${rain.toFixed(0)} mm rainfall and ${humidity.toFixed(0)}% humidity profile; adds nitrogen.` : "Temperature or water conditions are outside the configured range.", rotation: "Follow a cereal crop to reduce synthetic nitrogen demand." },
-    { name: "Shade coffee", stars: coffee, reason: coffee ? `Fits the observed ${temp.toFixed(1)} °C and ${rain.toFixed(0)} mm rainfall profile; retains permanent erosion cover.` : "Temperature and rainfall do not meet the configured coffee range.", rotation: "Use cover crops and legumes between rows." },
-    { name: "Maize", stars: maize, reason: maize ? `Fits the observed ${temp.toFixed(1)} °C and ${rain.toFixed(0)} mm rainfall profile for a short-cycle crop.` : "Temperature or rainfall is outside the configured maize range.", rotation: "Maize → beans → cover crop; monitor water and erosion." },
-  ].filter((crop) => crop.stars > 0 || temp < 12);
-}
 
-// Escala de altitud: verde (costa) -> amarillo-verdoso -> café (montaña). Tope 3000 m.
 const altColor = (m: number) => { const t = Math.max(0, Math.min(1, m / 3000)); return `hsl(${130 - t * 105} 55% ${52 - t * 22}%)`; };
 const ZOOM = 8;
 const dayString = (daysAgo: number) => new Date(Date.now() - daysAgo * 86400000).toISOString().slice(0, 10).replaceAll("-", "");
@@ -82,7 +133,6 @@ export default function KnowYourLandPage() {
 
   const createPin = useCallback((lat: number, lng: number) => window.L.marker([lat, lng], { icon: window.L.divIcon({ className: "farmer-red-pin", html: "<span></span>", iconSize: [26, 36], iconAnchor: [13, 36] }) }), []);
 
-  // Selecciona un punto: el pin se mueve AL INSTANTE y los datos llegan en paralelo.
   const select = useCallback(async (lat: number, lng: number, suppliedName?: string) => {
     setLoading(true);
     setMessage("Loading NASA POWER data...");
@@ -111,13 +161,12 @@ export default function KnowYourLandPage() {
     setLoading(false);
   }, []);
 
-  // 1) Crear el mapa (una sola vez)
   useEffect(() => {
     if (!ready || !window.L || map.current) return;
     const instance = window.L.map("land-map", { zoomControl: false }).setView([place.lat, place.lng], ZOOM);
     window.L.control.zoom({ position: "bottomright" }).addTo(instance);
     window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "OpenStreetMap contributors", maxZoom: 19 }).addTo(instance);
-    const pane = instance.createPane("heatPane"); pane.style.zIndex = "450"; pane.style.pointerEvents = "none"; pane.style.filter = "blur(10px)"; // difumina los círculos para que se fusionen como un área // sobre los tiles, bajo los pines
+    const pane = instance.createPane("heatPane"); pane.style.zIndex = "450"; pane.style.pointerEvents = "none"; pane.style.filter = "blur(10px)";
     instance.on("click", (event: any) => select(event.latlng.lat, event.latlng.lng));
     map.current = instance;
     marker.current = createPin(place.lat, place.lng).addTo(instance);
@@ -126,7 +175,6 @@ export default function KnowYourLandPage() {
     return () => { window.removeEventListener("resize", onResize); instance.remove(); map.current = null; };
   }, [ready, createPin, select]);
 
-  // 2) Pines de cultivos (solo en la capa Geographic)
   useEffect(() => {
     if (!map.current || !window.L || !ready) return;
     if (cropMarkersLayer.current) { map.current.removeLayer(cropMarkersLayer.current); cropMarkersLayer.current = null; }
@@ -140,14 +188,12 @@ export default function KnowYourLandPage() {
     return () => { if (cropMarkersLayer.current && map.current) { map.current.removeLayer(cropMarkersLayer.current); cropMarkersLayer.current = null; } };
   }, [ready, layer]);
 
-  // 3) Mover el pin y centrar el mapa
   useEffect(() => {
     if (!map.current || !marker.current) return;
     marker.current.setLatLng([place.lat, place.lng]);
     map.current.flyTo([place.lat, place.lng], Math.max(map.current.getZoom(), ZOOM), { duration: .8 });
   }, [place.lat, place.lng]);
 
-  // 4) MAPA DE CALOR con NASA POWER (API regional): temperatura, viento o lluvia
   useEffect(() => {
     if (!ready || !map.current || !window.L) return;
     gridLayer.current?.remove(); gridLayer.current = null;
@@ -155,7 +201,6 @@ export default function KnowYourLandPage() {
     const param = layer === "temperature" ? "T2M" : layer === "wind" ? "WS10M" : "PRECTOTCORR";
     const [min, max] = layer === "temperature" ? [0, 40] : layer === "wind" ? [0, 12] : [0, 240];
     const ctrl = new AbortController();
-    // dos cajas lado a lado (cada una < 4.5° x 4.5°, el máximo de la API regional)
     const box = (w: number, e: number) => `https://power.larc.nasa.gov/api/temporal/daily/regional?latitude-min=${place.lat - 1.2}&latitude-max=${place.lat + 1.2}&longitude-min=${w}&longitude-max=${e}&parameters=${param}&community=AG&start=${dayString(32)}&end=${dayString(3)}&format=JSON`;
     (async () => {
       const results = await Promise.all([box(place.lng - 4.4, place.lng), box(place.lng, place.lng + 4.4)].map((u) => getJson(u, 30000, ctrl.signal)));
@@ -175,13 +220,12 @@ export default function KnowYourLandPage() {
           cells += 1;
         }
       }
-      if (!cells) { setMessage("NASA POWER grid returned no cells for this area (check the response format in the console)."); console.log("POWER regional response:", results); return; }
+      if (!cells) { setMessage("NASA POWER grid returned no cells for this area."); return; }
       group.addTo(map.current); gridLayer.current = group;
     })();
     return () => { ctrl.abort(); gridLayer.current?.remove(); gridLayer.current = null; };
   }, [ready, layer, place.lat, place.lng]);
 
-  // 4b) ALTITUD: mapa de calor del terreno visible (se recalcula al mover o hacer zoom al mapa)
   useEffect(() => {
     if (!ready || !map.current || !window.L || layer !== "altitude") return;
     const m = map.current; const L = window.L;
@@ -203,7 +247,7 @@ export default function KnowYourLandPage() {
       const radius = Math.max(dLat * 111000, dLng * 111000 * Math.cos(((north + south) / 2) * Math.PI / 180)) * .8;
       pts.forEach(([lat, lng], i) => {
         const h = elev[i];
-        if (typeof h !== "number" || h <= 0) return; // el mar queda sin color
+        if (typeof h !== "number" || h <= 0) return;
         L.circle([lat, lng], { pane: "heatPane", radius, stroke: false, interactive: false, fillOpacity: .5, fillColor: altColor(h) }).addTo(group);
       });
       group.addTo(m); gridLayer.current = group;
@@ -213,13 +257,11 @@ export default function KnowYourLandPage() {
     return () => { clearTimeout(timer); ctrl?.abort(); m.off("moveend", schedule); gridLayer.current?.remove(); gridLayer.current = null; };
   }, [ready, layer]);
 
-  // Altitud del punto inicial (los demás puntos la traen desde select)
   useEffect(() => {
     getJson(`https://api.open-meteo.com/v1/elevation?latitude=${initialPlace.lat}&longitude=${initialPlace.lng}`, 8000)
       .then((r) => { if (typeof r?.elevation?.[0] === "number") setEnvironment((e) => (e.lastDate === "reference" ? { ...e, altitude: r.elevation[0] } : e)); });
   }, []);
 
-  // 5) Capa de suelo (SoilGrids / ISRIC)
   useEffect(() => {
     if (!map.current || !window.L || !ready) return;
     if (soilLayer.current) { map.current.removeLayer(soilLayer.current); soilLayer.current = null; }
@@ -243,7 +285,18 @@ export default function KnowYourLandPage() {
     } catch { setMessage("Place not found. Try a country, region or municipality."); setLoading(false); }
   }
 
-  const legend = legends[layer]; const crops = recommendations(environment); const metrics = getMetrics(environment);
+  const legend = legends[layer]; 
+  const metrics = getMetrics(environment);
+
+  // Ejecución dinámica del motor de cultivos avanzado basado en los inputs actuales
+  const evaluatedCrops = evaluateCrops({
+    tMean: environment.temperature,
+    rain: environment.rainfall * 12, // Anualización aproximada de lluvia para el motor
+    altitude: environment.altitude,
+    ph: environment.soilPh,
+    clay: environment.clay,
+    dryMonths: 3, // Estimado por defecto o calculado
+  });
 
   useEffect(() => {
     if (!marker.current || !window.L) return;
@@ -255,5 +308,94 @@ export default function KnowYourLandPage() {
     marker.current.bindPopup(label, { closeButton: false, className: "land-data-popup" }).openPopup();
   }, [ready, layer, place, environment]);
 
-  return <div className="land-module"><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" /><header className="land-header"><Link href="/" className="land-back">← Farmer Query</Link><div><h1>KNOW YOUR LAND</h1></div><span className="land-status"><i /> LIVE DATA</span></header><main className="land-content"><section className="land-map-panel"><div className="map-layer-bar">{(Object.keys(labels) as LayerId[]).map((id) => <button key={id} type="button" className={layer === id ? "active" : ""} onClick={() => setLayer(id)}>{labels[id]}</button>)}</div><div id="land-map" className="land-map" /><div className={`heat-legend ${legend.tone}`}><div className="legend-gradient" style={layer === "altitude" ? { background: "linear-gradient(90deg,hsl(130 55% 52%),hsl(78 55% 41%),hsl(25 55% 30%))" } : undefined} /><div className="legend-values"><span>{legend.min}</span><span>{legend.max}</span></div><small>{legend.description} · {legend.unit}</small></div></section><section className="land-search-row"><form onSubmit={search} className="land-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search a country, region or municipality" aria-label="Place" /><button type="submit">{loading ? "LOADING..." : "SEARCH PLACE"}</button></form><div className="land-place"><span>SELECTED LOCATION</span><strong>{place.name}, {place.country}</strong><small>{message}</small><code>{place.lat.toFixed(4)}°, {place.lng.toFixed(4)}°</code></div></section><section className="land-section-heading"><div><span className="land-code">ENVIRONMENTAL READING</span><h2>Place parameters</h2></div><p>Real NASA POWER readings for the selected coordinates, plus clearly labeled proxies.</p></section><section className="metric-grid">{metrics.map(([key, label, value, score, tone, note]) => <article className="metric-card" key={key}><div className="metric-card-top"><span>{label}</span><b className={`metric-icon ${tone}`}>{String(key).slice(0, 2).toUpperCase()}</b></div><strong className="metric-value">{value}</strong><div className="heat-track"><i className={String(tone)} style={{ width: `${Math.max(8, Number(score))}%` }} /></div><small>{note}</small></article>)}</section><section className="recommendation-section"><div className="land-section-heading"><div><span className="land-code">FARM DECISION SUPPORT</span><h2>What can be planted</h2></div><p>Recommendations are filtered out when temperature or rainfall is outside the configured crop range.</p></div><div className="recommendation-grid">{crops.map((crop) => <article className="recommendation-card" key={crop.name}><div className="recommendation-title"><h3>{crop.name}</h3><span className="stars">{"★".repeat(crop.stars)}<em>{"★".repeat(Math.max(0, 5 - crop.stars))}</em></span></div><p>{crop.reason}</p><small><strong>ROTATION:</strong> {crop.rotation}</small></article>)}</div></section><section className="land-disclaimer"><span>◈</span><p><strong>Decision support, not a verdict.</strong> Validate soil conditions, crop variety and field observations before planting.</p></section></main><Script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" strategy="afterInteractive" onLoad={() => setReady(true)} /></div>;
+  return (
+    <div className="land-module">
+      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+      <header className="land-header">
+        <Link href="/" className="land-back">← Farmer Query</Link>
+        <div><h1>KNOW YOUR LAND</h1></div>
+        <span className="land-status"><i /> LIVE DATA</span>
+      </header>
+      <main className="land-content">
+        <section className="land-map-panel">
+          <div className="map-layer-bar">
+            {(Object.keys(labels) as LayerId[]).map((id) => (
+              <button key={id} type="button" className={layer === id ? "active" : ""} onClick={() => setLayer(id)}>{labels[id]}</button>
+            ))}
+          </div>
+          <div id="land-map" className="land-map" />
+          <div className={`heat-legend ${legend.tone}`}>
+            <div className="legend-gradient" style={layer === "altitude" ? { background: "linear-gradient(90deg,hsl(130 55% 52%),hsl(78 55% 41%),hsl(25 55% 30%))" } : undefined} />
+            <div className="legend-values"><span>{legend.min}</span><span>{legend.max}</span></div>
+            <small>{legend.description} · {legend.unit}</small>
+          </div>
+        </section>
+
+        <section className="land-search-row">
+          <form onSubmit={search} className="land-search">
+            <span>⌕</span>
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search a country, region or municipality" aria-label="Place" />
+            <button type="submit">{loading ? "LOADING..." : "SEARCH PLACE"}</button>
+          </form>
+          <div className="land-place">
+            <span>SELECTED LOCATION</span>
+            <strong>{place.name}, {place.country}</strong>
+            <small>{message}</small>
+            <code>{place.lat.toFixed(4)}°, {place.lng.toFixed(4)}°</code>
+          </div>
+        </section>
+
+        <section className="land-section-heading">
+          <div><span className="land-code">ENVIRONMENTAL READING</span><h2>Place parameters</h2></div>
+          <p>Real NASA POWER readings for the selected coordinates, plus clearly labeled proxies.</p>
+        </section>
+
+        <section className="metric-grid">
+          {metrics.map(([key, label, value, score, tone, note]) => (
+            <article className="metric-card" key={key}>
+              <div className="metric-card-top">
+                <span>{label}</span>
+                <b className={`metric-icon ${tone}`}>{String(key).slice(0, 2).toUpperCase()}</b>
+              </div>
+              <strong className="metric-value">{value}</strong>
+              <div className="heat-track"><i className={String(tone)} style={{ width: `${Math.max(8, Number(score))}%` }} /></div>
+              <small>{note}</small>
+            </article>
+          ))}
+        </section>
+
+        <section className="recommendation-section">
+          <div className="land-section-heading">
+            <div><span className="land-code">FARM DECISION SUPPORT (FAO ECO-CROP ENGINE)</span><h2>What can be planted</h2></div>
+            <p>Advanced sensitivity analysis scoring based on agroecological limits, climate statistics, and limiting factors.</p>
+          </div>
+          <div className="recommendation-grid">
+            {evaluatedCrops.map((crop) => {
+              // Convertimos el puntaje de 0-100 a un sistema de estrellas de 0 a 5
+              const stars = Math.round((crop.score / 100) * 5);
+              return (
+                <article className="recommendation-card" key={crop.id}>
+                  <div className="recommendation-title">
+                    <h3>{crop.name}</h3>
+                    <span className="stars">
+                      {"★".repeat(stars)}<em>{"★".repeat(Math.max(0, 5 - stars))}</em>
+                    </span>
+                  </div>
+                  <p><strong>Aptitude: {crop.score}% ({crop.verdict})</strong></p>
+                  <p><small>Limiting factor: {crop.limiting}</small></p>
+                  <small><strong>SENSITIVITY SD:</strong> ±{crop.sd}% variance across climate scenarios</small>
+                </article>
+              );
+            })}
+          </div>
+        </section>
+
+        <section className="land-disclaimer">
+          <span>◈</span>
+          <p><strong>Decision support, not a verdict.</strong> Validate soil conditions, crop variety and field observations before planting.</p>
+        </section>
+      </main>
+      <Script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" strategy="afterInteractive" onLoad={() => setReady(true)} />
+    </div>
+  );
 }
