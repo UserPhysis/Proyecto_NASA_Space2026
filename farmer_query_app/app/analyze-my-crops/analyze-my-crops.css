@@ -1,0 +1,51 @@
+/* ---- Dos gráficas al costado (temperatura | lluvia anual) ---- */
+.ac-par {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 24px;
+  align-items: start;
+  margin-top: 8px;
+}
+@media (max-width: 900px) {
+  .ac-par {
+    grid-template-columns: 1fr;
+  }
+}
+.ac-subtitulo {
+  font-size: 14px;
+  margin: 0 0 8px;
+}
+
+/* ---- Campos de texto del panel de ubicación ---- */
+.ac-campo input {
+  background: transparent;
+  border: 1px solid #1d3044;
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+  padding: 8px 10px;
+  min-width: 0;
+}
+
+/* ---- Lista de resultados de búsqueda ---- */
+.ac-lista {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+}
+.ac-lista button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid #1d3044;
+  border-radius: 6px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  margin-bottom: 4px;
+  padding: 8px 10px;
+}
+.ac-lista button:hover {
+  border-color: #51dfad;
+}
