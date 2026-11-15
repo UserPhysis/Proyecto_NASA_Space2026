@@ -3,9 +3,9 @@
 import { useState } from "react";
 import Link from "next/link";
 import Script from "next/script";
-import "./modulo1.css";
+import "./know-your-land.css";
 
-export default function Modulo1Page() {
+export default function KnowYourLandPage() {
   const [leafletListo, setLeafletListo] = useState(false);
   const [chartListo, setChartListo] = useState(false);
 
@@ -118,9 +118,9 @@ export default function Modulo1Page() {
         onLoad={() => setChartListo(true)}
       />
 
-      {/* 2. Ejecutar tu modulo1.js solo cuando ambos estén listos */}
+      {/* Run the module script after both libraries are ready. */}
       {leafletListo && chartListo && (
-        <Script src="/modulo1.js" strategy="afterInteractive" />
+        <Script src="/know-your-land.js" strategy="afterInteractive" />
       )}
     </div>
   );
