@@ -1,0 +1,95 @@
+.contenedor-mapa {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #1a1a1a;
+}
+
+.barra {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid #c8c8c8;
+  background: #fff;
+}
+
+.barra label {
+  font-size: 0.95rem;
+}
+
+.barra input[type="month"] {
+  padding: 6px 8px;
+  border: 1px solid #c8c8c8;
+  border-radius: 4px;
+  font-size: 1rem;
+}
+
+#coords {
+  font-size: 0.95rem;
+  margin-left: auto;
+}
+
+.volver {
+  color: #1a1a1a;
+  text-decoration: none;
+  padding: 6px 10px;
+  border: 1px solid #c8c8c8;
+  border-radius: 4px;
+  font-size: 0.95rem;
+}
+
+.volver:hover {
+  background: #f4f4f4;
+}
+
+.boton {
+  padding: 6px 10px;
+  border: 1px solid #c8c8c8;
+  border-radius: 4px;
+  background: #fff;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.boton:hover {
+  background: #f4f4f4;
+}
+
+#slider {
+  flex: 1;
+  min-width: 160px;
+  max-width: 520px;
+}
+
+#etiqueta {
+  min-width: 5.5em;
+  font-variant-numeric: tabular-nums;
+}
+
+#mapa {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+
+.leyenda {
+  background: #fff;
+  padding: 6px;
+  border: 1px solid #c8c8c8;
+  border-radius: 4px;
+}
+
+.leyenda img {
+  display: block;
+  height: 220px;
+}
+
+.leyenda small {
+  display: block;
+  font-size: 11px;
+  margin-top: 4px;
+  max-width: 135px;
+}
