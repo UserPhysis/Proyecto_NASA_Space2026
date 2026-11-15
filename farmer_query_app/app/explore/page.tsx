@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import Script from "next/script";
-import "./mapa.css";
+import "./explore.css";
 
 declare global {
   interface Window {
@@ -30,7 +30,7 @@ function urlCapa(mes: string) {
   return `${BASE}/${CAPA}/default/${mes}-01/${MATRIZ}/{z}/{y}/{x}.png`;
 }
 
-export default function MapaPage() {
+export default function ExplorePage() {
   const [indice, setIndice] = useState<number>(MAX_INDICE);
   const [reproduciendo, setReproduciendo] = useState<boolean>(false);
   const [coords, setCoords] = useState<string>("Haz clic en el mapa para ver coordenadas.");
