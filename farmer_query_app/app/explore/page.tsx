@@ -64,8 +64,8 @@ export default function ExplorePage() {
     leyenda.onAdd = function () {
       const div = L.DomUtil.create("div", "leyenda");
       div.innerHTML =
-        '<img src="https://gibs.earthdata.nasa.gov/legends/MODIS_Land_Surface_Temp_V.svg" alt="Leyenda de temperatura">' +
-        "<small>Temperatura superficial (promedio mensual, diurna)</small>";
+        '<img src="https://gibs.earthdata.nasa.gov/legends/MODIS_Land_Surface_Temp_V.svg" alt="Temperature legend">' +
+        "<small>Land surface temperature (monthly daytime average)</small>";
       return div;
     };
     leyenda.addTo(mapa);
@@ -101,7 +101,7 @@ export default function ExplorePage() {
     return () => clearTimeout(espera);
   }, [indice]);
 
-  // Controlar la reproducción automática
+  // Control automatic playback.
   useEffect(() => {
     if (!reproduciendo) return;
 
@@ -142,7 +142,7 @@ export default function ExplorePage() {
 
       <div className="barra">
         <Link href="/" className="volver">
-          &larr; Inicio
+          &larr; Home
         </Link>
         <button
           type="button"

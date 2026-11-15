@@ -1,108 +1,91 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import Link from "next/link";
 import Script from "next/script";
 import "./know-your-land.css";
 
-declare global {
-  interface Window { L: any }
-}
-
+declare global { interface Window { L: any } }
+type LayerId = "base" | "temperature" | "wind" | "precipitation" | "soil";
 type Place = { name: string; lat: number; lng: number; country: string };
-type Metric = { key: string; label: string; value: string; score: number; tone: string; note: string };
-type CropRecommendation = { name: string; stars: number; reason: string; rotation: string };
+type Environment = { temperature: number; rainfall: number; humidity: number; wind: number; soilPh: number | null; clay: number | null; latestTemperature: number; latestRainfall: number; latestWind: number; lastDate: string };
+type GridCell = { lat: number; lng: number; temperature: number; rainfall: number; wind: number };
 
 const initialPlace: Place = { name: "Apaneca-Ilamatepec", lat: 13.85, lng: -89.8, country: "El Salvador" };
+const initialEnvironment: Environment = { temperature: 22.8, rainfall: 165.5, humidity: 62, wind: 2.4, soilPh: null, clay: null, latestTemperature: 22.8, latestRainfall: 5.4, latestWind: 2.4, lastDate: "reference" };
+const labels: Record<LayerId, string> = { base: "Geographic", temperature: "Temperature", wind: "Wind", precipitation: "Rainfall", soil: "Soil texture" };
+type CropMarker = { crop: string; region: string; lat: number; lng: number; source: string; color: string; code: string };
+const cropMarkers: CropMarker[] = [
+  { crop: "Rice", region: "South and Southeast Asia", lat: 22.8, lng: 90.4, source: "FAOSTAT crop production regions", color: "#f4c95d", code: "RI" },
+  { crop: "Maize", region: "United States Corn Belt", lat: 41.5, lng: -93.5, source: "USDA crop production regions", color: "#f6a64b", code: "MZ" },
+  { crop: "Coffee", region: "Central America", lat: 14.2, lng: -89.2, source: "FAOSTAT crop production regions", color: "#c98b5b", code: "CF" },
+  { crop: "Wheat", region: "North American Great Plains", lat: 39.2, lng: -100.2, source: "USDA crop production regions", color: "#e6d36f", code: "WH" },
+  { crop: "Soybean", region: "Brazilian Cerrado", lat: -15.8, lng: -47.9, source: "FAOSTAT crop production regions", color: "#91c96b", code: "SO" },
+  { crop: "Cocoa", region: "West Africa", lat: 7.4, lng: -5.5, source: "FAOSTAT crop production regions", color: "#a875d1", code: "CO" },
+  { crop: "Potato", region: "Andean highlands", lat: -13.5, lng: -72, source: "FAOSTAT crop production regions", color: "#e28a6d", code: "PO" },
+  { crop: "Canola", region: "Canadian Prairies", lat: 51.2, lng: -106.2, source: "USDA crop production regions", color: "#f4d35e", code: "CA" },
+];
+const legends: Record<LayerId, { min: string; max: string; unit: string; description: string; tone: string }> = {
+  base: { min: "Low", max: "High", unit: "context", description: "Geographic context", tone: "geographic" },
+  temperature: { min: "0", max: "40", unit: "°C", description: "Temperature surface", tone: "temperature" },
+  wind: { min: "0", max: "12", unit: "m/s", description: "Wind surface", tone: "wind" },
+  precipitation: { min: "0", max: "240", unit: "mm", description: "Rainfall surface", tone: "precipitation" },
+  soil: { min: "Low", max: "High", unit: "clay", description: "Soil texture proxy", tone: "soil" },
+};
 
-function normalize(value: number, min: number, max: number) {
-  return Math.max(0, Math.min(100, Math.round(((value - min) / (max - min)) * 100)));
-}
-
-function getMetrics(temp: number, rain: number, humidity: number): Metric[] {
-  const heatStress = normalize(temp, 18, 34);
-  const rainfall = normalize(rain, 0, 240);
-  const soilMoisture = Math.round(Math.max(0, Math.min(100, humidity * 0.72 + rainfall * 0.28)));
+function normalize(value: number, min: number, max: number) { return Math.max(0, Math.min(100, Math.round(((value - min) / (max - min)) * 100))); }
+function getMetrics(environment: Environment) {
+  const { temperature: temp, rainfall: rain, humidity } = environment;
+  const heat = normalize(temp, 18, 34); const rainScore = normalize(rain, 0, 240); const moisture = Math.round(Math.max(0, Math.min(100, humidity * .72 + rainScore * .28)));
   return [
-    { key: "temperature", label: "Temperatura", value: `${temp.toFixed(1)} °C`, score: normalize(temp, 8, 34), tone: "amber", note: "Media de 30 días" },
-    { key: "heat", label: "Estrés térmico", value: heatStress > 72 ? "Alto" : heatStress > 45 ? "Medio" : "Bajo", score: heatStress, tone: "red", note: "Riesgo por calor" },
-    { key: "rain", label: "Precipitación", value: `${rain.toFixed(0)} mm`, score: rainfall, tone: "blue", note: "Acumulada en 30 días" },
-    { key: "soil", label: "Humedad del suelo", value: `${soilMoisture}%`, score: soilMoisture, tone: "green", note: "Estimación satelital" },
-    { key: "evaporation", label: "Evaporación", value: `${(3.4 + temp * 0.08).toFixed(1)} mm/día`, score: normalize(temp, 10, 35), tone: "amber", note: "Demanda atmosférica" },
-    { key: "frost", label: "Riesgo de helada", value: temp < 12 ? "Alto" : temp < 17 ? "Medio" : "Bajo", score: 100 - normalize(temp, 4, 24), tone: "violet", note: "Temperatura mínima estimada" },
-    { key: "extreme-rain", label: "Lluvia extrema", value: rain > 180 ? "Alto" : "Bajo", score: normalize(rain, 60, 260), tone: "cyan", note: "Eventos intensos" },
-    { key: "vegetation", label: "Estrés de vegetación", value: soilMoisture < 35 ? "Medio" : "Bajo", score: 100 - soilMoisture, tone: "green", note: "Proxy de disponibilidad hídrica" },
-    { key: "water-trend", label: "Tendencia hídrica", value: rain > 130 ? "Favorable" : "Vigilar", score: rainfall, tone: "blue", note: "Señal de corto plazo" },
+    ["temperature", "Temperature", `${temp.toFixed(1)} °C`, normalize(temp, 8, 34), "amber", "30-day average"],
+    ["heat", "Heat stress", heat > 72 ? "High" : heat > 45 ? "Medium" : "Low", heat, "red", "Heat exposure risk"],
+    ["rain", "Rainfall", `${rain.toFixed(0)} mm`, rainScore, "blue", "30-day accumulation"],
+    ["soil", "Soil moisture", `${moisture}%`, moisture, "green", "Satellite-informed proxy"],
+    ["evaporation", "Evaporation", `${(3.4 + temp * .08).toFixed(1)} mm/day`, normalize(temp, 10, 35), "amber", "Atmospheric demand"],
+    ["frost", "Frost risk", temp < 12 ? "High" : temp < 17 ? "Medium" : "Low", 100 - normalize(temp, 4, 24), "violet", "Estimated minimum temperature"],
+    ["extreme-rain", "Extreme rainfall", rain > 180 ? "High" : "Low", normalize(rain, 60, 260), "cyan", "Intense event signal"],
+    ["vegetation", "Vegetation stress", moisture < 35 ? "Medium" : "Low", 100 - moisture, "green", "Water availability proxy"],
+    ["water-trend", "Water trend", rain > 130 ? "Favorable" : "Watch", rainScore, "blue", "Short-term signal"],
   ];
 }
-
-function getRecommendations(temp: number, rain: number, humidity: number): CropRecommendation[] {
-  const waterScore = rain > 140 && humidity > 55 ? 5 : rain > 90 ? 4 : 3;
-  const coffeeScore = temp >= 18 && temp <= 25 && rain >= 100 ? 5 : temp >= 16 && rain >= 80 ? 4 : 2;
-  const grainScore = temp >= 19 && temp <= 31 && rain >= 70 ? 4 : 3;
+function recommendations({ temperature: temp, rainfall: rain, humidity, soilPh, clay }: Environment) {
+  if (temp < 5) return [{ name: "No conventional crop", stars: 0, reason: "Temperature is below the practical range for the available crop rules.", rotation: "Protect soil with a cold-climate cover strategy and verify local conditions." }];
+  const soilPenalty = soilPh !== null && (soilPh < 5 || soilPh > 8) ? 1 : 0;
+  const clayPenalty = clay !== null && clay > 60 ? 1 : 0;
+  const beans = temp >= 12 && temp <= 30 && rain >= 45 ? Math.max(0, Math.min(5, 2 + (rain >= 90 ? 1 : 0) + (humidity >= 50 ? 1 : 0) + (soilPh !== null && soilPh >= 5.5 && soilPh <= 7.5 ? 1 : 0) - soilPenalty)) : 0;
+  const coffee = temp >= 18 && temp <= 25 && rain >= 100 ? Math.max(0, 5 - soilPenalty - clayPenalty) : 0;
+  const maize = temp >= 18 && temp <= 32 && rain >= 70 ? Math.max(0, 3 + (rain >= 100 ? 1 : 0) + (soilPh !== null && soilPh >= 5.5 && soilPh <= 7.5 ? 1 : 0) - soilPenalty) : 0;
   return [
-    { name: "Frijol", stars: waterScore, reason: "Aporta nitrógeno y ayuda a recuperar materia orgánica.", rotation: "Después de un cereal; reduce la dependencia de fertilizante nitrogenado." },
-    { name: "Café de sombra", stars: coffeeScore, reason: "Compatible con clima templado y cobertura permanente contra erosión.", rotation: "Sistema perenne con cobertura vegetal y leguminosa entre hileras." },
-    { name: "Maíz", stars: grainScore, reason: "Ciclo conocido y útil para alternar con una leguminosa.", rotation: "Maíz → frijol → cobertura; vigilar demanda de agua y erosión." },
-  ];
+    { name: "Beans", stars: beans, reason: beans ? `Fits the observed ${temp.toFixed(1)} °C, ${rain.toFixed(0)} mm rainfall and ${humidity.toFixed(0)}% humidity profile; adds nitrogen.` : "Temperature or water conditions are outside the configured range.", rotation: "Follow a cereal crop to reduce synthetic nitrogen demand." },
+    { name: "Shade coffee", stars: coffee, reason: coffee ? `Fits the observed ${temp.toFixed(1)} °C and ${rain.toFixed(0)} mm rainfall profile; retains permanent erosion cover.` : "Temperature and rainfall do not meet the configured coffee range.", rotation: "Use cover crops and legumes between rows." },
+    { name: "Maize", stars: maize, reason: maize ? `Fits the observed ${temp.toFixed(1)} °C and ${rain.toFixed(0)} mm rainfall profile for a short-cycle crop.` : "Temperature or rainfall is outside the configured maize range.", rotation: "Maize → beans → cover crop; monitor water and erosion." },
+  ].filter((crop) => crop.stars > 0 || temp < 12);
 }
 
 export default function KnowYourLandPage() {
-  const [leafletReady, setLeafletReady] = useState(false);
-  const [place, setPlace] = useState(initialPlace);
-  const [query, setQuery] = useState("El Salvador");
-  const [metrics, setMetrics] = useState<Metric[]>(getMetrics(22.8, 165.5, 62));
-  const [recommendations, setRecommendations] = useState<CropRecommendation[]>(getRecommendations(22.8, 165.5, 62));
-  const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState("Datos de referencia cargados");
-  const mapRef = useRef<any>(null);
-  const markerRef = useRef<any>(null);
-
-  useEffect(() => {
-    if (!leafletReady || !window.L || mapRef.current) return;
-    const map = window.L.map("land-map", { zoomControl: false }).setView([place.lat, place.lng], 7);
-    window.L.control.zoom({ position: "bottomright" }).addTo(map);
-    window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap contributors" }).addTo(map);
-    markerRef.current = window.L.circleMarker([place.lat, place.lng], { radius: 9, color: "#50e5b0", fillColor: "#50e5b0", fillOpacity: .8 }).addTo(map);
-    mapRef.current = map;
-    return () => { map.remove(); mapRef.current = null; };
-  }, [leafletReady, place.lat, place.lng]);
-
-  async function searchPlace(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!query.trim() || loading) return;
-    setLoading(true); setMessage("Buscando ubicación y datos ambientales…");
+  const [ready, setReady] = useState(false); const [place, setPlace] = useState(initialPlace); const [query, setQuery] = useState("El Salvador"); const [layer, setLayer] = useState<LayerId>("temperature"); const [environment, setEnvironment] = useState(initialEnvironment); const [loading, setLoading] = useState(false); const [message, setMessage] = useState("Reference data loaded");
+  const map = useRef<any>(null); const marker = useRef<any>(null); const heatLayer = useRef<any>(null); const cropMarkersLayer = useRef<any>(null);
+  const createPin = useCallback((lat: number, lng: number) => window.L.marker([lat, lng], { icon: window.L.divIcon({ className: "farmer-red-pin", html: "<span></span>", iconSize: [26, 36], iconAnchor: [13, 36] }) }), []);
+  const select = useCallback(async (lat: number, lng: number, suppliedName?: string) => {
+    let selectedName = suppliedName || "Selected point"; let country = place.country;
+    if (!suppliedName) { try { const reverse = await (await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}`)).json(); selectedName = reverse.display_name?.split(",")[0] || selectedName; country = reverse.address?.country || country; } catch { /* coordinates remain authoritative if reverse geocoding is unavailable */ } }
     try {
-      const geoResponse = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(query)}`);
-      const geoData = await geoResponse.json();
-      if (!geoData[0]) throw new Error("Lugar no encontrado");
-      const nextPlace = { name: geoData[0].display_name.split(",")[0], lat: Number(geoData[0].lat), lng: Number(geoData[0].lon), country: geoData[0].display_name.split(",").slice(-1)[0].trim() };
-      const end = new Date(Date.now() - 3 * 86400000); const start = new Date(end.getTime() - 29 * 86400000);
-      const formatDate = (date: Date) => date.toISOString().slice(0, 10).replaceAll("-", "");
-      const powerUrl = `https://power.larc.nasa.gov/api/temporal/daily/point?parameters=T2M,PRECTOTCORR,RH2M&community=AG&longitude=${nextPlace.lng.toFixed(4)}&latitude=${nextPlace.lat.toFixed(4)}&start=${formatDate(start)}&end=${formatDate(end)}&format=JSON`;
-      const powerResponse = await fetch(powerUrl); const data = await powerResponse.json(); const parameters = data.properties.parameter;
-      const values = (input: Record<string, number>) => Object.values(input).filter((value) => value > -999);
-      const temperatures = values(parameters.T2M); const rainValues = values(parameters.PRECTOTCORR); const humidityValues = values(parameters.RH2M);
-      const average = (items: number[]) => items.reduce((sum, value) => sum + value, 0) / Math.max(items.length, 1);
-      const averageTemperature = average(temperatures); const totalRain = rainValues.reduce((sum, value) => sum + value, 0); const averageHumidity = average(humidityValues);
-      setPlace(nextPlace); setMetrics(getMetrics(averageTemperature, totalRain, averageHumidity)); setRecommendations(getRecommendations(averageTemperature, totalRain, averageHumidity)); setMessage("Datos NASA POWER actualizados");
-      window.setTimeout(() => mapRef.current?.setView([nextPlace.lat, nextPlace.lng], 8), 50);
-    } catch { setMessage("No se pudo consultar el lugar. Prueba con un país o municipio."); }
-    finally { setLoading(false); }
-  }
-
-  return <div className="land-module">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <header className="land-header"><Link href="/" className="land-back">← Farmer Query</Link><div><span className="land-code">MODULE 01 / LAND INTELLIGENCE</span><h1>CONOCER MI TERRENO</h1></div><span className="land-status"><i /> LIVE DATA</span></header>
-    <main className="land-content">
-      <section className="land-map-panel"><div id="land-map" className="land-map" /><div className="map-overlay"><span>RESOLUCIÓN OPERATIVA</span><strong>Municipio · 1–10 km</strong><small>Consulta liviana con datos satelitales y climáticos agregados.</small></div></section>
-      <section className="land-search-row"><form onSubmit={searchPlace} className="land-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Escribe un país, región o municipio" aria-label="Lugar" /><button type="submit">{loading ? "CONSULTANDO…" : "BUSCAR LUGAR"}</button></form><div className="land-place"><span>UBICACIÓN ANALIZADA</span><strong>{place.name}, {place.country}</strong><small>{message}</small></div></section>
-      <section className="land-section-heading"><div><span className="land-code">LECTURA AMBIENTAL</span><h2>Parámetros del lugar</h2></div><p>Cada tarjeta resume una señal y su intensidad relativa para orientar el siguiente análisis.</p></section>
-      <section className="metric-grid">{metrics.map((metric) => <article className="metric-card" key={metric.key}><div className="metric-card-top"><span>{metric.label}</span><b className={`metric-icon ${metric.tone}`}>{metric.key.slice(0, 2).toUpperCase()}</b></div><strong className="metric-value">{metric.value}</strong><div className="heat-track"><i className={metric.tone} style={{ width: `${Math.max(8, metric.score)}%` }} /></div><small>{metric.note}</small></article>)}</section>
-      <section className="recommendation-section"><div className="land-section-heading"><div><span className="land-code">DECISIÓN AGRÍCOLA</span><h2>Qué puede sembrar</h2></div><p>Ranking inicial de 1 a 5 estrellas. Se actualizará al combinar suelo local, clima, mercado y prioridades del agricultor.</p></div><div className="recommendation-grid">{recommendations.map((crop) => <article className="recommendation-card" key={crop.name}><div className="recommendation-title"><h3>{crop.name}</h3><span className="stars" aria-label={`${crop.stars} de 5 estrellas`}>{"★".repeat(crop.stars)}<em>{"★".repeat(5 - crop.stars)}</em></span></div><p>{crop.reason}</p><small><strong>ROTACIÓN:</strong> {crop.rotation}</small></article>)}</div></section>
-      <section className="land-disclaimer"><span>◈</span><p><strong>Ayuda para decidir, no una sentencia.</strong> Estas lecturas combinan datos satelitales y rangos de referencia. Valida el suelo, la variedad y las condiciones reales de tu parcela antes de sembrar.</p></section>
-    </main>
-    <Script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" strategy="afterInteractive" onLoad={() => setLeafletReady(true)} />
-  </div>;
+      const end = new Date(Date.now() - 3 * 86400000); const start = new Date(end.getTime() - 29 * 86400000); const format = (date: Date) => date.toISOString().slice(0, 10).replaceAll("-", "");
+      const response = await fetch(`https://power.larc.nasa.gov/api/temporal/daily/point?parameters=T2M,PRECTOTCORR,RH2M,WS10M&community=AG&longitude=${lng.toFixed(4)}&latitude=${lat.toFixed(4)}&start=${format(start)}&end=${format(end)}&format=JSON`); const parameters = (await response.json()).properties.parameter; const values = (input: Record<string, number>) => Object.values(input).filter((value) => value > -999); const average = (valuesToAverage: number[]) => valuesToAverage.reduce((a, b) => a + b, 0) / Math.max(valuesToAverage.length, 1); const latest = (input: Record<string, number>) => { const entries = Object.entries(input).filter(([, value]) => value > -999); return entries[entries.length - 1] || ["reference", 0]; }; const soil = await fetch(`https://rest.isric.org/soilgrids/v2.0/properties/query?lon=${lng.toFixed(4)}&lat=${lat.toFixed(4)}&property=phh2o&property=clay&depth=0-5cm&value=mean`).then((result) => result.ok ? result.json() : null).catch(() => null); const soilValues = soil?.properties?.layers || []; const findSoil = (name: string) => soilValues.find((item: any) => item.name === name)?.depths?.[0]?.values?.mean; const latestTemp = latest(parameters.T2M); const latestRain = latest(parameters.PRECTOTCORR); const latestWind = latest(parameters.WS10M); const next = { temperature: average(values(parameters.T2M)), rainfall: values(parameters.PRECTOTCORR).reduce((a, b) => a + b, 0), humidity: average(values(parameters.RH2M)), wind: average(values(parameters.WS10M)), soilPh: typeof findSoil("phh2o") === "number" ? findSoil("phh2o") / 10 : null, clay: typeof findSoil("clay") === "number" ? findSoil("clay") / 10 : null, latestTemperature: Number(latestTemp[1]), latestRainfall: Number(latestRain[1]), latestWind: Number(latestWind[1]), lastDate: String(latestTemp[0]) };
+      setPlace({ name: selectedName, lat, lng, country }); setEnvironment(next); setMessage("NASA POWER data updated for the selected coordinates");
+    } catch { setPlace({ name: selectedName, lat, lng, country }); setMessage("The data source is unavailable for this point."); } finally { setLoading(false); }
+  }, [createPin, place.country]);
+  useEffect(() => { let cancelled = false; const panel = document.querySelector(".land-map-panel") as HTMLElement | null; if (!panel) return; let canvas = panel.querySelector(".heat-canvas") as HTMLCanvasElement | null; if (!canvas) { canvas = document.createElement("canvas"); canvas.className = "heat-canvas"; canvas.setAttribute("aria-hidden", "true"); panel.appendChild(canvas); } const context = canvas.getContext("2d"); if (!context || layer === "base" || layer === "soil") { if (context) context.clearRect(0, 0, canvas.width, canvas.height); return; } async function drawSurface() { const offsets = [-3, -2, -1, 0, 1, 2, 3]; const coordinates = offsets.flatMap((row) => offsets.map((column) => ({ lat: place.lat + row * .45, lng: place.lng + column * .55 }))); const latitudes = coordinates.map((coordinate) => coordinate.lat.toFixed(3)).join(","); const longitudes = coordinates.map((coordinate) => coordinate.lng.toFixed(3)).join(","); const response = await fetch("https://api.open-meteo.com/v1/forecast?latitude=" + latitudes + "&longitude=" + longitudes + "&current=temperature_2m,wind_speed_10m,precipitation&timezone=UTC"); const payload = await response.json(); const records = Array.isArray(payload) ? payload : [payload]; if (cancelled) return; const width = panel!.clientWidth; const height = panel!.clientHeight; canvas!.width = width; canvas!.height = height; const pixels = context!.createImageData(width, height); const values = records.map((record: any) => layer === "temperature" ? Number(record.current?.temperature_2m) : layer === "wind" ? Number(record.current?.wind_speed_10m) : Number(record.current?.precipitation)); const maximum = layer === "temperature" ? 40 : layer === "wind" ? 12 : 20; for (let y = 0; y < height; y += 1) { const gy = y / Math.max(1, height - 1) * 6; const y0 = Math.floor(gy); const y1 = Math.min(6, y0 + 1); const fy = gy - y0; for (let x = 0; x < width; x += 1) { const gx = x / Math.max(1, width - 1) * 6; const x0 = Math.floor(gx); const x1 = Math.min(6, x0 + 1); const fx = gx - x0; const a = values[y0 * 7 + x0] || 0; const b = values[y0 * 7 + x1] || a; const c = values[y1 * 7 + x0] || a; const d = values[y1 * 7 + x1] || a; const value = a * (1 - fx) * (1 - fy) + b * fx * (1 - fy) + c * (1 - fx) * fy + d * fx * fy; const normalized = Math.max(0, Math.min(1, value / maximum)); const hue = layer === "wind" ? 275 - normalized * 235 : 220 - normalized * 220; const saturation = .84; const lightness = .52; const chroma = saturation * Math.min(lightness, 1 - lightness); const h = hue / 360; const channel = (n: number) => { const k = (n + h * 12) % 12; return lightness - chroma * Math.max(-1, Math.min(k - 3, Math.min(9 - k, 1))); }; const index = (y * width + x) * 4; pixels.data[index] = Math.round(255 * channel(0)); pixels.data[index + 1] = Math.round(255 * channel(8)); pixels.data[index + 2] = Math.round(255 * channel(4)); pixels.data[index + 3] = Math.round(255 * (.12 + normalized * .42)); } } context!.putImageData(pixels, 0, 0); } drawSurface().catch(() => { if (context) context.clearRect(0, 0, canvas!.width, canvas!.height); }); return () => { cancelled = true; if (context) context.clearRect(0, 0, canvas!.width, canvas!.height); }; }, [layer, place.lat, place.lng]);
+  useEffect(() => { if (!ready || !window.L || map.current) return; const instance = window.L.map("land-map", { zoomControl: false }).setView([place.lat, place.lng], 7); window.L.control.zoom({ position: "bottomright" }).addTo(instance); window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "OpenStreetMap contributors", maxZoom: 19 }).addTo(instance); instance.on("click", (event: any) => select(event.latlng.lat, event.latlng.lng)); map.current = instance; marker.current = createPin(place.lat, place.lng).addTo(instance); return () => { instance.remove(); map.current = null; }; }, [ready, createPin, select]);
+  useEffect(() => { if (!map.current || !ready) return; const satellite = window.L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", { attribution: "© Esri, Maxar, Earthstar Geographics", opacity: 1 }); satellite.addTo(map.current); return () => { if (map.current) map.current.removeLayer(satellite); }; }, [ready]);
+  useEffect(() => { if (!map.current || !window.L || !ready) return; if (cropMarkersLayer.current) { map.current.removeLayer(cropMarkersLayer.current); cropMarkersLayer.current = null; } if (layer !== "base") return; const group = window.L.layerGroup(); cropMarkers.forEach((crop) => { const icon = window.L.divIcon({ className: "crop-map-pin", html: `<span style="background:${crop.color}"><b>${crop.code}</b></span>`, iconSize: [28, 28], iconAnchor: [14, 28], popupAnchor: [0, -26] }); window.L.marker([crop.lat, crop.lng], { icon }).bindPopup(`<strong>${crop.crop}</strong><br><small>${crop.region}</small><br><small>Representative production region</small><br><small>${crop.source}</small>`, { className: "crop-data-popup" }).addTo(group); }); group.addTo(map.current); cropMarkersLayer.current = group; return () => { if (cropMarkersLayer.current && map.current) { map.current.removeLayer(cropMarkersLayer.current); cropMarkersLayer.current = null; } }; }, [ready, layer]);
+  useEffect(() => { if (!map.current || !window.L || !ready) return; const layers: any[] = []; map.current.eachLayer((item: any) => { if (item._url) layers.push(item); }); layers.forEach((item: any) => map.current.removeLayer(item)); const base = window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "OpenStreetMap contributors", maxZoom: 19 }).addTo(map.current); return () => { if (map.current) map.current.removeLayer(base); }; }, [ready]);
+  useEffect(() => { if (!map.current || !marker.current) return; marker.current.setLatLng([place.lat, place.lng]); map.current.flyTo([place.lat, place.lng], Math.max(map.current.getZoom(), 7), { duration: .8 }); }, [place.lat, place.lng]);
+  useEffect(() => { if (!map.current || !window.L || !ready) return; if (heatLayer.current) { map.current.removeLayer(heatLayer.current); heatLayer.current = null; } if (layer !== "soil") return; const soilLayer = window.L.tileLayer.wms("https://maps.isric.org/mapserv", { layers: "clay_0-5cm_mean", format: "image/png", transparent: true, opacity: .52, attribution: "SoilGrids / ISRIC" }).addTo(map.current); heatLayer.current = soilLayer; return () => { if (heatLayer.current && map.current) { map.current.removeLayer(heatLayer.current); heatLayer.current = null; } }; }, [ready, layer, place.lat, place.lng]);
+  async function search(event: FormEvent<HTMLFormElement>) { event.preventDefault(); if (!query.trim() || loading) return; setLoading(true); setMessage("Finding place..."); try { const result = (await (await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(query)}`)).json())[0]; if (!result) throw new Error(); const selected = { name: result.display_name.split(",")[0], lat: Number(result.lat), lng: Number(result.lon), country: result.display_name.split(",").slice(-1)[0].trim() }; map.current?.setView([selected.lat, selected.lng], 8); await select(selected.lat, selected.lng, selected.name); } catch { setMessage("Place not found. Try a country, region or municipality."); setLoading(false); } }
+  const legend = legends[layer]; const crops = recommendations(environment); const metrics = getMetrics(environment);
+  useEffect(() => { if (!marker.current || !window.L) return; const label = layer === "temperature" ? `${place.name}<br><strong>Latest: ${environment.latestTemperature.toFixed(1)} °C</strong><br><small>30-day mean: ${environment.temperature.toFixed(1)} °C · ${environment.lastDate}</small>` : layer === "precipitation" ? `${place.name}<br><strong>Latest: ${environment.latestRainfall.toFixed(1)} mm</strong><br><small>30-day total: ${environment.rainfall.toFixed(1)} mm · ${environment.lastDate}</small>` : layer === "wind" ? `${place.name}<br><strong>Latest: ${environment.latestWind.toFixed(1)} m/s</strong><br><small>30-day mean: ${environment.wind.toFixed(1)} m/s · ${environment.lastDate}</small>` : layer === "soil" ? `${place.name}<br><strong>Soil texture</strong><br><small>Clay: ${environment.clay === null ? "Unavailable" : `${environment.clay.toFixed(1)}%`} · pH: ${environment.soilPh === null ? "Unavailable" : environment.soilPh.toFixed(1)}</small>` : `${place.name}<br><small>Geographic map · ${place.lat.toFixed(4)}°, ${place.lng.toFixed(4)}°</small>`; marker.current.bindPopup(label, { closeButton: false, className: "land-data-popup" }).openPopup(); }, [ready, layer, place, environment]);
+  return <div className="land-module"><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" /><header className="land-header"><Link href="/" className="land-back">← Farmer Query</Link><div><span className="land-code">MODULE 01 / LAND INTELLIGENCE</span><h1>KNOW YOUR LAND</h1></div><span className="land-status"><i /> LIVE DATA</span></header><main className="land-content"><section className="land-map-panel"><div className="map-layer-bar">{(Object.keys(labels) as LayerId[]).map((id) => <button key={id} type="button" className={layer === id ? "active" : ""} onClick={() => setLayer(id)}>{labels[id]}</button>)}</div><div id="land-map" className="land-map" /><div className={`heat-legend ${legend.tone}`}><div className="legend-gradient" /><div className="legend-values"><span>{legend.min}</span><span>{legend.max}</span></div><small>{legend.description} · {legend.unit}</small></div></section><section className="land-search-row"><form onSubmit={search} className="land-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search a country, region or municipality" aria-label="Place" /><button type="submit">{loading ? "LOADING..." : "SEARCH PLACE"}</button></form><div className="land-place"><span>SELECTED LOCATION</span><strong>{place.name}, {place.country}</strong><small>{message}</small><code>{place.lat.toFixed(4)}°, {place.lng.toFixed(4)}°</code></div></section><section className="land-section-heading"><div><span className="land-code">ENVIRONMENTAL READING</span><h2>Place parameters</h2></div><p>Real NASA POWER readings for the selected coordinates, plus clearly labeled proxies.</p></section><section className="metric-grid">{metrics.map(([key, label, value, score, tone, note]) => <article className="metric-card" key={key}><div className="metric-card-top"><span>{label}</span><b className={`metric-icon ${tone}`}>{String(key).slice(0, 2).toUpperCase()}</b></div><strong className="metric-value">{value}</strong><div className="heat-track"><i className={String(tone)} style={{ width: `${Math.max(8, Number(score))}%` }} /></div><small>{note}</small></article>)}</section><section className="recommendation-section"><div className="land-section-heading"><div><span className="land-code">FARM DECISION SUPPORT</span><h2>What can be planted</h2></div><p>Recommendations are filtered out when temperature or rainfall is outside the configured crop range.</p></div><div className="recommendation-grid">{crops.map((crop) => <article className="recommendation-card" key={crop.name}><div className="recommendation-title"><h3>{crop.name}</h3><span className="stars">{"★".repeat(crop.stars)}<em>{"★".repeat(Math.max(0, 5 - crop.stars))}</em></span></div><p>{crop.reason}</p><small><strong>ROTATION:</strong> {crop.rotation}</small></article>)}</div></section><section className="land-disclaimer"><span>◈</span><p><strong>Decision support, not a verdict.</strong> Validate soil conditions, crop variety and field observations before planting.</p></section></main><Script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" strategy="afterInteractive" onLoad={() => setReady(true)} /></div>;
 }
