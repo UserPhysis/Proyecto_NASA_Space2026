@@ -2,171 +2,163 @@
 
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
-import Script from "next/script";
 import "./explore.css";
-
-declare global {
-  interface Window {
-    L: any;
-  }
-}
-
-const CAPA = "MODIS_Terra_L3_Land_Surface_Temp_Monthly_Day";
-const MATRIZ = "GoogleMapsCompatible_Level6";
-const BASE = "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best";
-
-const INICIO = { y: 2000, m: 3 };
-const FIN = { y: 2026, m: 10 };
-const MAX_INDICE = (FIN.y - INICIO.y) * 12 + (FIN.m - INICIO.m);
-
-function mesDeIndice(i: number) {
-  const n = INICIO.m - 1 + i;
-  const y = INICIO.y + Math.floor(n / 12);
-  const m = (n % 12) + 1;
-  return `${y}-${String(m).padStart(2, "0")}`;
-}
-
-function urlCapa(mes: string) {
-  return `${BASE}/${CAPA}/default/${mes}-01/${MATRIZ}/{z}/{y}/{x}.png`;
-}
+import CropFinder from "../_cultivos/CropFinder";
+import GlobeDecor from "../_cultivos/GlobeDecor";
+import { lugar, nombreCultivo, type Cultivo } from "../_cultivos/datos";
 
 export default function ExplorePage() {
-  const [indice, setIndice] = useState<number>(MAX_INDICE);
-  const [reproduciendo, setReproduciendo] = useState<boolean>(false);
-  const [coords, setCoords] = useState<string>("Haz clic en el mapa para ver coordenadas.");
-  const [leafletListo, setLeafletListo] = useState<boolean>(false);
+  const [coords, setCoords] = useState<string>("Click the globe to see coordinates.");
+  const [entrando, setEntrando] = useState<boolean>(true); // transición de entrada
+  const [ficha, setFicha] = useState<Cultivo | null>(null);
 
-  const mapaRef = useRef<any>(null);
-  const capaTempRef = useRef<any>(null);
-  const marcadorRef = useRef<any>(null);
+  const timersRef = useRef<number[]>([]);
+  const activoRef = useRef<boolean>(false);
+  const globoCargadoRef = useRef<boolean>(false);
 
-  // Inicializar el mapa una vez que Leaflet carga
+  const detener = () => {
+    timersRef.current.forEach((t) => clearTimeout(t));
+    timersRef.current = [];
+  };
+
+  // ---------- Cargar el MISMO globo de la home (three.js + /globe.js) ----------
+  // Al navegar con Link los <Script> de la home no se vuelven a ejecutar y el nuevo
+  // #globo quedaría vacío, por eso se cargan a mano al entrar.
   useEffect(() => {
-    if (!leafletListo || !window.L || mapaRef.current) return;
-
-    const L = window.L;
-    const mapa = L.map("mapa").setView([13.7, -88.9], 5);
-
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 18,
-      attribution: "&copy; OpenStreetMap",
-    }).addTo(mapa);
-
-    const capaTemp = L.tileLayer(urlCapa(mesDeIndice(MAX_INDICE)), {
-      maxNativeZoom: 6,
-      maxZoom: 12,
-      opacity: 0.75,
-      attribution: "NASA GIBS / MODIS Terra LST",
-    }).addTo(mapa);
-
-    // Leyenda oficial de GIBS
-    const leyenda = L.control({ position: "bottomright" });
-    leyenda.onAdd = function () {
-      const div = L.DomUtil.create("div", "leyenda");
-      div.innerHTML =
-        '<img src="https://gibs.earthdata.nasa.gov/legends/MODIS_Land_Surface_Temp_V.svg" alt="Temperature legend">' +
-        "<small>Land surface temperature (monthly daytime average)</small>";
-      return div;
-    };
-    leyenda.addTo(mapa);
-
-    // Coordenadas al hacer clic
-    mapa.on("click", (e: any) => {
-      const { lat, lng } = e.latlng;
-      setCoords(`Lat: ${lat.toFixed(4)}°, Lon: ${lng.toFixed(4)}°`);
-      if (marcadorRef.current) marcadorRef.current.remove();
-      marcadorRef.current = L.circleMarker([lat, lng], {
-        radius: 6,
-        color: "#d32f2f",
-      }).addTo(mapa);
-    });
-
-    mapaRef.current = mapa;
-    capaTempRef.current = capaTemp;
-
-    return () => {
-      mapa.remove();
-      mapaRef.current = null;
-    };
-  }, [leafletListo]);
-
-  // Actualizar la capa satelital cuando cambia el mes en el slider
-  useEffect(() => {
-    if (!capaTempRef.current) return;
-    const mes = mesDeIndice(indice);
-    const espera = setTimeout(() => {
-      capaTempRef.current.setUrl(urlCapa(mes));
-    }, 150);
-
-    return () => clearTimeout(espera);
-  }, [indice]);
-
-  // Control automatic playback.
-  useEffect(() => {
-    if (!reproduciendo) return;
-
-    const timer = setInterval(() => {
-      setIndice((prev) => {
-        if (prev >= MAX_INDICE) {
-          setReproduciendo(false);
-          return prev;
+    activoRef.current = true;
+    if (!globoCargadoRef.current) {
+      globoCargadoRef.current = true;
+      const cargar = (src: string) =>
+        new Promise<void>((ok, fallo) => {
+          const s = document.createElement("script");
+          s.src = src;
+          s.onload = () => ok();
+          s.onerror = () => fallo();
+          document.body.appendChild(s);
+        });
+      (async () => {
+        try {
+          if (!(window as any).THREE) {
+            await cargar("https://unpkg.com/three@0.160.0/build/three.min.js");
+          }
+          if (!activoRef.current) {
+            globoCargadoRef.current = false;
+            return;
+          }
+          // &e= fuerza a que globe.js se ejecute de nuevo sobre el nuevo #globo
+          await cargar(`/globe.js?v=4&e=${Date.now()}`);
+        } catch {
+          globoCargadoRef.current = false;
         }
-        return prev + 1;
-      });
-    }, 1200);
-
-    return () => clearInterval(timer);
-  }, [reproduciendo]);
-
-  const togglePlay = () => {
-    if (reproduciendo) {
-      setReproduciendo(false);
-    } else {
-      if (indice >= MAX_INDICE) setIndice(0);
-      setReproduciendo(true);
+      })();
     }
+    return () => {
+      activoRef.current = false;
+      detener();
+      (window as any).earthGlobe?.destroy?.(); // solo si tu globe.js lo define
+    };
+  }, []);
+
+  // Transición de entrada: el globo "aterriza" y desaparece el aviso
+  useEffect(() => {
+    const t = window.setTimeout(() => setEntrando(false), 1300);
+    return () => clearTimeout(t);
+  }, []);
+
+  // Clic en el globo: globe.js avisa con este evento (el mismo que usa la home)
+  useEffect(() => {
+    const onPick = (event: Event) => {
+      const { lat, lng } = (event as CustomEvent<{ lat: number; lng: number }>).detail;
+      detener();
+      setFicha(null);
+      setCoords(`Lat: ${lat.toFixed(4)}°, Lon: ${lng.toFixed(4)}°`);
+    };
+    window.addEventListener("earth:pick", onPick);
+    return () => window.removeEventListener("earth:pick", onPick);
+  }, []);
+
+  // ---------- Animaciones de cultivos (usan earthGlobe.setPin, que ya existe) ----------
+  // Si más adelante globe.js define setPins/clearPins, se dibujan también todos los pines acumulados.
+  const recorrer = (lista: Cultivo[]) => {
+    detener();
+    setFicha(null);
+    const globo = (window as any).earthGlobe;
+    globo?.clearPins?.();
+    const paradas = lista.slice(0, 15); // máximo 15 paradas
+    paradas.forEach((c, i) => {
+      timersRef.current.push(
+        window.setTimeout(() => {
+          globo?.setPin?.(c.lat, c.lon, true);
+          globo?.setPins?.(
+            paradas.slice(0, i + 1).map((s) => ({ lat: s.lat, lng: s.lon, label: s.emoji }))
+          );
+          setFicha(c);
+        }, 300 + i * 1400)
+      );
+    });
+  };
+
+  const irAlMejor = (c: Cultivo) => {
+    detener();
+    const globo = (window as any).earthGlobe;
+    globo?.clearPins?.();
+    globo?.setPin?.(c.lat, c.lon, true);
+    setFicha(c);
   };
 
   return (
     <div className="contenedor-mapa">
-      {/* Cargar CSS y JS de Leaflet */}
-      <link
-        rel="stylesheet"
-        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-      />
-      <Script
-        src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-        strategy="afterInteractive"
-        onLoad={() => setLeafletListo(true)}
-      />
-
       <div className="barra">
         <Link href="/" className="volver">
           &larr; Home
         </Link>
-        <button
-          type="button"
-          id="play"
-          className="boton"
-          aria-label="Reproducir"
-          onClick={togglePlay}
-        >
-          {reproduciendo ? "❚❚ Pausar" : "▶ Reproducir"}
-        </button>
-        <input
-          type="range"
-          id="slider"
-          min={0}
-          max={MAX_INDICE}
-          value={indice}
-          onChange={(e) => setIndice(Number(e.target.value))}
-          aria-label="Mes"
-        />
-        <strong id="etiqueta">{mesDeIndice(indice)}</strong>
         <span id="coords">{coords}</span>
       </div>
 
-      <div id="mapa"></div>
+      <div className={`vista-globo ${entrando ? "entrando" : ""}`}>
+        {entrando && (
+          <div className="launch-feedback">
+            OPENING EXPLORE
+            <span />
+            <small>Loading regions and crops</small>
+          </div>
+        )}
+
+        <div className="globe-wrap">
+          <GlobeDecor />
+          <div className="globe" id="globo" />
+        </div>
+
+        {ficha && (
+          <div className="location-card">
+            <div className="location-card-top">
+              <span>SELECTED REGION</span>
+              <b>REGION DATA</b>
+            </div>
+            <h2>
+              {ficha.emoji} {nombreCultivo(ficha.cultivo, "en")}
+            </h2>
+            <p>{lugar(ficha, "en")}</p>
+            <p>
+              Lat. {ficha.lat.toFixed(2)}° · Lon. {ficha.lon.toFixed(2)}°
+            </p>
+            <div className="metrics">
+              <div>
+                <span className="metric-icon warm">♨</span>
+                <strong>{ficha.temp} °C</strong>
+                <small>Average annual temperature</small>
+              </div>
+              <div>
+                <span className="metric-icon rain">♢</span>
+                <strong>{ficha.lluvia} mm</strong>
+                <small>Annual rainfall</small>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <CropFinder lang="en" overlay onShow={recorrer} onBest={irAlMejor} />
     </div>
   );
 }
