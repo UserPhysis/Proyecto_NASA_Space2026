@@ -4,123 +4,160 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import "./analyze-my-crops.css";
 
-/* ---------------- Configuración ---------------- */
+/* ---------------- Configuration ---------------- */
 
-type Ubicacion = { nombre: string; lat: number; lon: number };
+type Place = { name: string; lat: number; lon: number };
 
-const UBICACION_INICIAL: Ubicacion = {
-  nombre: "Apaneca-Ilamatepec, El Salvador",
+const INITIAL_PLACE: Place = {
+  name: "Apaneca-Ilamatepec, El Salvador",
   lat: 13.85,
   lon: -89.8,
 };
 
-const ANIOS_ATRAS = 20;
-const MIN_ANIOS = 8; // menos años completos que esto = "sin datos suficientes"
-const UMBRAL_SI = 0.8; // 80 % de los años o más → Sí conviene
-const UMBRAL_CUIDADO = 0.5; // entre 50 % y 80 % → Con cuidado; menos → No conviene
-const MES_SECO_MM = 50; // un mes con menos de esto cuenta como "seco" (solo advertencia)
-const RATIO_ET0_AVISO = 0.5; // si la lluvia del ciclo cubre menos de este % de la ET0, se avisa (sin peso)
+const YEARS_BACK = 20;
+const MIN_YEARS = 8; // fewer complete years than this = "not enough data"
+const YES_THRESHOLD = 0.8; // 80 % of years or more -> good to plant
+const CAUTION_THRESHOLD = 0.5; // between 50 % and 80 % -> caution; below -> not recommended
+const DRY_MONTH_MM = 50; // a month with less rain than this counts as "dry" (warning only)
+const ET0_WARNING_RATIO = 0.5; // if cycle rainfall covers less than this share of ET0, warn (no weight)
 
-const MESES = [
-  "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
 ];
 
-/* ---------------- Tipos ---------------- */
+/* ---------------- Crop icons ---------------- */
+// Matches by keyword in the crop name (Spanish names from ecocrop.json plus English ones).
+const ICONS: [string[], string][] = [
+  [["maíz", "maiz", "maize", "corn"], "🌽"],
+  [["frijol", "haba", "soja", "soya", "bean", "soy"], "🫘"],
+  [["arroz", "trigo", "sorgo", "cebada", "avena", "rice", "wheat", "sorghum", "barley", "oat"], "🌾"],
+  [["café", "cafe", "coffee"], "☕"],
+  [["tomate", "tomato"], "🍅"],
+  [["chile", "pimiento", "ají", "pepper", "chili"], "🌶️"],
+  [["papa", "yuca", "camote", "potato", "cassava", "sweet potato"], "🥔"],
+  [["plátano", "banano", "banana", "plantain"], "🍌"],
+  [["cacao", "cocoa"], "🍫"],
+  [["caña", "sugarcane", "sugar cane"], "🎋"],
+  [["aguacate", "avocado"], "🥑"],
+  [["piña", "pineapple"], "🍍"],
+  [["naranja", "limón", "limon", "mandarina", "orange", "lemon", "lime", "mandarin"], "🍊"],
+  [["cebolla", "onion"], "🧅"],
+  [["zanahoria", "carrot"], "🥕"],
+  [["ayote", "calabaza", "zapallo", "squash", "pumpkin"], "🎃"],
+  [["sandía", "sandia", "watermelon"], "🍉"],
+  [["mango"], "🥭"],
+  [["coco", "coconut"], "🥥"],
+];
 
-// NASA POWER (temperatura media mensual)
-type SerieMensual = Record<string, number>;
-type DatosPower = Record<string, SerieMensual>;
-type VariablePower = "T2M";
-type Resultado = { clave: string; datos: DatosPower | null; error: string | null };
+function cropIcon(name: string): string {
+  const n = name.toLowerCase();
+  return ICONS.find(([keys]) => keys.some((k) => n.includes(k)))?.[1] ?? "🌱";
+}
 
-// ERA5 vía Open-Meteo (lluvia, ET0 y mínima diaria, agregadas por mes)
-type MesEra = { lluvia: number; et0: number | null; tMinAbs: number };
-type DatosEra = Record<string, MesEra>; // clave "YYYYMM"
+/* ---------------- Types ---------------- */
 
-type Rango = {
+// NASA POWER (monthly mean temperature)
+type MonthlySeries = Record<string, number>;
+type PowerData = Record<string, MonthlySeries>;
+type PowerVariable = "T2M";
+type PowerResult = { key: string; data: PowerData | null; error: string | null };
+
+// ERA5 via Open-Meteo (rainfall, ET0 and daily minimum, aggregated by month)
+type EraMonth = { rain: number; et0: number | null; tMinAbs: number };
+type EraData = Record<string, EraMonth>; // key "YYYYMM"
+
+// NOTE: the field names of Range / CropEco match ecocrop.json, so they stay as they are.
+type Range = {
   min: number | null;
   optMin: number | null;
   optMax: number | null;
   max: number | null;
 };
-type CultivoEco = {
+type CropEco = {
   cientifico: string;
-  temperatura: Rango;
-  tLetal?: number | null; // temperatura letal (KTMP), opcional: requiere volver a correr el script
-  ph?: Rango;
-  lluviaAnual?: Rango; // mm durante el ciclo del cultivo (así lo interpreta EcoCrop)
+  temperatura: Range;
+  tLetal?: number | null; // lethal temperature (KTMP), optional: requires re-running the script
+  ph?: Range;
+  lluviaAnual?: Range; // mm during the crop cycle (this is how EcoCrop defines it)
   cicloDias: { min: number | null; max: number | null };
 };
-type EcoCrop = { fuente: string; cultivos: Record<string, CultivoEco> };
+type EcoCrop = { fuente: string; cultivos: Record<string, CropEco> };
 
-type Curva = { anioSiembra: number; valores: number[] };
-type Clase = "optimo" | "absoluto" | "fuera";
-type Veredicto = "si" | "cuidado" | "no" | "sin";
-type NivelMes = "bien" | "justo" | "riesgo";
-type ResultadoGeo = { id: number; nombre: string; lat: number; lon: number };
+type Curve = { sowYear: number; values: number[] };
+type Class = "optimal" | "absolute" | "outside";
+type Verdict = "yes" | "caution" | "no" | "none";
+type MonthLevel = "good" | "fair" | "risk";
+type GeoResult = { id: number; name: string; lat: number; lon: number };
 
-type PhSuelo = { media: number; p5: number; p95: number };
-type Extra<T> = { clave: string; valor: T | null; error: string | null };
+type SoilPh = { mean: number; p5: number; p95: number };
+type Extra<T> = { key: string; value: T | null; error: string | null };
 
-type StatMes = {
+type MonthStat = {
   n: number;
-  ok: number; // años con ese mes dentro de los límites absolutos
-  bajos: number; // años por debajo del mínimo
-  altos: number; // años por encima del máximo
-  mediana: number;
+  ok: number; // years with that month inside the absolute limits
+  low: number; // years below the minimum
+  high: number; // years above the maximum
+  median: number;
 };
-type Analisis = {
+type Analysis = {
   n: number;
-  curvas: Curva[];
-  porMes: StatMes[];
-  cicloOk: number; // años con TODOS los meses del ciclo dentro de límites
-  critico: { mes: number; fallos: number } | null;
+  curves: Curve[];
+  byMonth: MonthStat[];
+  cycleOk: number; // years with ALL cycle months inside the limits
+  critical: { month: number; fails: number } | null;
 };
 
-type ResumenLluvia = {
+type RainSummary = {
   n: number;
-  mediana: number; // lluvia total del ciclo, año típico
+  median: number; // total cycle rainfall, typical year
   p10: number;
   p90: number;
-  ok: number; // años con lluvia del ciclo dentro de lo que tolera
-  secos: number; // meses del ciclo cuya lluvia típica es menor a MES_SECO_MM
+  ok: number; // years with cycle rainfall inside what the crop tolerates
+  dry: number; // cycle months whose typical rainfall is below DRY_MONTH_MM
 };
 
-/* ---------------- Utilidades ---------------- */
+type RotationStep = { crop: string; month: number };
 
-function formatear(valor: number, decimales = 0) {
-  return valor.toLocaleString("es-SV", {
-    minimumFractionDigits: decimales,
-    maximumFractionDigits: decimales,
+/* ---------------- Utilities ---------------- */
+
+function fmt(value: number, decimals = 0) {
+  return value.toLocaleString("en-US", {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
   });
 }
 
-function redondear(v: number) {
+function round2(v: number) {
   return Math.round(v * 100) / 100;
 }
 
-function tieneRango(r: Rango | undefined | null): r is Rango {
+function hasRange(r: Range | undefined | null): r is Range {
   return !!r && (r.min !== null || r.optMin !== null || r.optMax !== null || r.max !== null);
 }
 
-const diasEnMes = (anio: number, mes: number) => new Date(anio, mes, 0).getDate();
+const daysInMonth = (year: number, month: number) => new Date(year, month, 0).getDate();
 
-/* ---------------- Temperatura: NASA POWER ---------------- */
+function joinList(items: string[]): string {
+  if (items.length <= 1) return items[0] ?? "";
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
 
-async function pedirDatosPower(
-  u: Ubicacion,
-  desde: number,
-  hasta: number,
+/* ---------------- Temperature: NASA POWER ---------------- */
+
+async function fetchPowerData(
+  p: Place,
+  from: number,
+  to: number,
   signal: AbortSignal
-): Promise<DatosPower> {
+): Promise<PowerData> {
   const params = new URLSearchParams({
     parameters: "T2M",
     community: "AG",
-    latitude: String(u.lat),
-    longitude: String(u.lon),
-    start: String(desde),
-    end: String(hasta),
+    latitude: String(p.lat),
+    longitude: String(p.lon),
+    start: String(from),
+    end: String(to),
     format: "JSON",
   });
   const url = `https://power.larc.nasa.gov/api/temporal/monthly/point?${params.toString()}`;
@@ -130,69 +167,68 @@ async function pedirDatosPower(
     res = await fetch(url, { signal: AbortSignal.any([signal, AbortSignal.timeout(30000)]) });
   } catch (e) {
     if (e instanceof DOMException && e.name === "TimeoutError") {
-      throw new Error("NASA POWER tardó más de 30 segundos en responder. Probá de nuevo.");
+      throw new Error("NASA POWER took more than 30 seconds to respond. Please try again.");
     }
     throw e;
   }
-  if (!res.ok) throw new Error(`NASA POWER respondió con error ${res.status}`);
+  if (!res.ok) throw new Error(`NASA POWER responded with error ${res.status}`);
   const json = await res.json();
-  const datos = json?.properties?.parameter;
-  if (!datos) throw new Error("La respuesta de NASA POWER no tiene el formato esperado");
-  return datos as DatosPower;
+  const data = json?.properties?.parameter;
+  if (!data) throw new Error("The NASA POWER response does not have the expected format");
+  return data as PowerData;
 }
 
-// Valor mensual crudo de POWER (clave "YYYYMM"). null si falta (-999 = sin dato).
-function valorMensual(datos: DatosPower, variable: VariablePower, anio: number, mes: number): number | null {
-  const bruto = datos[variable]?.[`${anio}${String(mes).padStart(2, "0")}`];
-  return typeof bruto === "number" && bruto > -900 ? bruto : null;
+// Raw monthly POWER value (key "YYYYMM"). null if missing (-999 = no data).
+function monthlyValue(data: PowerData, variable: PowerVariable, year: number, month: number): number | null {
+  const raw = data[variable]?.[`${year}${String(month).padStart(2, "0")}`];
+  return typeof raw === "number" && raw > -900 ? raw : null;
 }
 
-// Una curva por año de siembra. Solo entran años con TODOS los meses del ciclo publicados.
-function curvasMensuales(datos: DatosPower, mesSiembra: number, nMeses: number, anios: number[]): Curva[] {
-  const completas: Curva[] = [];
-  for (const anioSiembra of anios) {
-    const valores: number[] = [];
-    let completa = true;
-    for (let i = 0; i < nMeses; i++) {
-      const idx = mesSiembra - 1 + i;
-      const v = valorMensual(datos, "T2M", anioSiembra + Math.floor(idx / 12), (idx % 12) + 1);
+// One curve per sowing year. Only years with ALL cycle months published are included.
+function monthlyCurves(data: PowerData, sowMonth: number, nMonths: number, years: number[]): Curve[] {
+  const complete: Curve[] = [];
+  for (const sowYear of years) {
+    const values: number[] = [];
+    let isComplete = true;
+    for (let i = 0; i < nMonths; i++) {
+      const idx = sowMonth - 1 + i;
+      const v = monthlyValue(data, "T2M", sowYear + Math.floor(idx / 12), (idx % 12) + 1);
       if (v === null) {
-        completa = false;
+        isComplete = false;
         break;
       }
-      valores.push(v);
+      values.push(v);
     }
-    if (completa) completas.push({ anioSiembra, valores });
+    if (isComplete) complete.push({ sowYear, values });
   }
-  return completas;
+  return complete;
 }
 
-/* ---------------- Lluvia, ET0 y mínima diaria: ERA5 vía Open-Meteo ---------------- */
+/* ---------------- Rainfall, ET0 and daily minimum: ERA5 via Open-Meteo ---------------- */
 
-// Caché por coordenadas para no repetir la descarga de 20 años de datos diarios.
-const cacheEra = new Map<string, DatosEra>();
+// Cache by coordinates so 20 years of daily data are not downloaded again.
+const eraCache = new Map<string, EraData>();
 
-// Se usa el modelo "era5", no "era5_land": con era5_land la lluvia llega vacía.
-async function pedirDatosEra(
-  u: Ubicacion,
-  desde: number,
-  hasta: number,
+// The "era5" model is used, not "era5_land": with era5_land rainfall comes back empty.
+async function fetchEraData(
+  p: Place,
+  from: number,
+  to: number,
   signal: AbortSignal
-): Promise<DatosEra> {
-  const claveCache = `${u.lat},${u.lon},${desde},${hasta}`;
-  const guardado = cacheEra.get(claveCache);
-  if (guardado) return guardado;
+): Promise<EraData> {
+  const cacheKey = `${p.lat},${p.lon},${from},${to}`;
+  const cached = eraCache.get(cacheKey);
+  if (cached) return cached;
 
-  // ERA5 publica con ~5 días de retraso
-  const limite = new Date(Date.now() - 7 * 864e5);
-  const fin =
-    hasta >= limite.getFullYear() ? limite.toISOString().slice(0, 10) : `${hasta}-12-31`;
+  // ERA5 is published with ~5 days of delay
+  const limit = new Date(Date.now() - 7 * 864e5);
+  const end = to >= limit.getFullYear() ? limit.toISOString().slice(0, 10) : `${to}-12-31`;
 
   const params = new URLSearchParams({
-    latitude: String(u.lat),
-    longitude: String(u.lon),
-    start_date: `${desde}-01-01`,
-    end_date: fin,
+    latitude: String(p.lat),
+    longitude: String(p.lon),
+    start_date: `${from}-01-01`,
+    end_date: end,
     daily: "precipitation_sum,temperature_2m_min,et0_fao_evapotranspiration",
     models: "era5",
     timezone: "auto",
@@ -205,258 +241,282 @@ async function pedirDatosEra(
     });
   } catch (e) {
     if (e instanceof DOMException && e.name === "TimeoutError") {
-      throw new Error("Open-Meteo (ERA5) tardó más de 45 segundos en responder. Probá de nuevo.");
+      throw new Error("Open-Meteo (ERA5) took more than 45 seconds to respond. Please try again.");
     }
     throw e;
   }
-  if (!res.ok) throw new Error(`Open-Meteo (ERA5) respondió con error ${res.status}`);
+  if (!res.ok) throw new Error(`Open-Meteo (ERA5) responded with error ${res.status}`);
 
   const json = await res.json();
   const d = json?.daily;
   if (!d?.time || !d?.precipitation_sum || !d?.temperature_2m_min) {
-    throw new Error("La respuesta de ERA5 no tiene el formato esperado");
+    throw new Error("The ERA5 response does not have the expected format");
   }
-  const et0Diaria: (number | null)[] | undefined = d.et0_fao_evapotranspiration;
+  const dailyEt0: (number | null)[] | undefined = d.et0_fao_evapotranspiration;
 
   const acc: Record<string, { n: number; p: number; tmin: number; nE: number; e: number }> = {};
-  (d.time as string[]).forEach((dia, i) => {
+  (d.time as string[]).forEach((day, i) => {
     const p = d.precipitation_sum[i];
     const tm = d.temperature_2m_min[i];
     if (p == null || tm == null) return;
-    const k = dia.slice(0, 4) + dia.slice(5, 7);
+    const k = day.slice(0, 4) + day.slice(5, 7);
     const a = (acc[k] ??= { n: 0, p: 0, tmin: Infinity, nE: 0, e: 0 });
     a.n++;
     a.p += p;
     a.tmin = Math.min(a.tmin, tm);
-    const e = et0Diaria?.[i];
+    const e = dailyEt0?.[i];
     if (e != null) {
       a.nE++;
       a.e += e;
     }
   });
 
-  const out: DatosEra = {};
+  const out: EraData = {};
   for (const [k, a] of Object.entries(acc)) {
-    const dias = diasEnMes(Number(k.slice(0, 4)), Number(k.slice(4)));
-    if (a.n < dias) continue; // solo meses completos
-    out[k] = { lluvia: a.p, et0: a.nE >= dias ? a.e : null, tMinAbs: a.tmin };
+    const days = daysInMonth(Number(k.slice(0, 4)), Number(k.slice(4)));
+    if (a.n < days) continue; // complete months only
+    out[k] = { rain: a.p, et0: a.nE >= days ? a.e : null, tMinAbs: a.tmin };
   }
-  if (Object.keys(out).length === 0) throw new Error("ERA5 no devolvió meses completos para este punto.");
+  if (Object.keys(out).length === 0) throw new Error("ERA5 returned no complete months for this point.");
 
-  cacheEra.set(claveCache, out);
+  eraCache.set(cacheKey, out);
   return out;
 }
 
-function mesEra(datos: DatosEra, anio: number, mes: number): MesEra | null {
-  return datos[`${anio}${String(mes).padStart(2, "0")}`] ?? null;
+function eraMonth(data: EraData, year: number, month: number): EraMonth | null {
+  return data[`${year}${String(month).padStart(2, "0")}`] ?? null;
 }
 
-// Valores mensuales (mm) de cada año de siembra con ciclo completo: un arreglo de nMeses por año.
-function ciclosEra(
-  datos: DatosEra,
-  campo: "lluvia" | "et0",
-  mesSiembra: number,
-  nMeses: number,
-  anios: number[]
+// Monthly values (mm) for each sowing year with a complete cycle: one array of nMonths per year.
+function eraCycles(
+  data: EraData,
+  field: "rain" | "et0",
+  sowMonth: number,
+  nMonths: number,
+  years: number[]
 ): number[][] {
-  const ciclos: number[][] = [];
-  for (const anioSiembra of anios) {
-    const mensual: number[] = [];
-    let completo = true;
-    for (let i = 0; i < nMeses; i++) {
-      const idx = mesSiembra - 1 + i;
-      const m = mesEra(datos, anioSiembra + Math.floor(idx / 12), (idx % 12) + 1);
-      const v = m ? m[campo] : null;
+  const cycles: number[][] = [];
+  for (const sowYear of years) {
+    const monthly: number[] = [];
+    let complete = true;
+    for (let i = 0; i < nMonths; i++) {
+      const idx = sowMonth - 1 + i;
+      const m = eraMonth(data, sowYear + Math.floor(idx / 12), (idx % 12) + 1);
+      const v = m ? m[field] : null;
       if (v === null || v === undefined) {
-        completo = false;
+        complete = false;
         break;
       }
-      mensual.push(v);
+      monthly.push(v);
     }
-    if (completo) ciclos.push(mensual);
+    if (complete) cycles.push(monthly);
   }
-  return ciclos;
+  return cycles;
 }
 
-// Temperatura mínima diaria más baja de cada ciclo completo (para temperatura letal).
-function minimasDelCiclo(datos: DatosEra, mesSiembra: number, nMeses: number, anios: number[]): number[] {
-  const minimas: number[] = [];
-  for (const anioSiembra of anios) {
-    let minimo = Infinity;
-    let completo = true;
-    for (let i = 0; i < nMeses; i++) {
-      const idx = mesSiembra - 1 + i;
-      const m = mesEra(datos, anioSiembra + Math.floor(idx / 12), (idx % 12) + 1);
+// Lowest daily minimum temperature of each complete cycle (for lethal temperature).
+function cycleMinimums(data: EraData, sowMonth: number, nMonths: number, years: number[]): number[] {
+  const minimums: number[] = [];
+  for (const sowYear of years) {
+    let minimum = Infinity;
+    let complete = true;
+    for (let i = 0; i < nMonths; i++) {
+      const idx = sowMonth - 1 + i;
+      const m = eraMonth(data, sowYear + Math.floor(idx / 12), (idx % 12) + 1);
       if (!m) {
-        completo = false;
+        complete = false;
         break;
       }
-      minimo = Math.min(minimo, m.tMinAbs);
+      minimum = Math.min(minimum, m.tMinAbs);
     }
-    if (completo) minimas.push(minimo);
+    if (complete) minimums.push(minimum);
   }
-  return minimas;
+  return minimums;
 }
 
-function mediana(valores: number[]): number {
-  const s = [...valores].sort((a, b) => a - b);
+function median(values: number[]): number {
+  const s = [...values].sort((a, b) => a - b);
   const m = Math.floor(s.length / 2);
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
-function percentil(valores: number[], p: number): number {
-  const s = [...valores].sort((a, b) => a - b);
+function percentile(values: number[], p: number): number {
+  const s = [...values].sort((a, b) => a - b);
   const i = (p / 100) * (s.length - 1);
   const lo = Math.floor(i);
   const hi = Math.ceil(i);
   return s[lo] + (s[hi] - s[lo]) * (i - lo);
 }
 
-function clasificarRango(v: number, r: Rango): Clase {
+function classifyRange(v: number, r: Range): Class {
   const min = r.min ?? -Infinity;
   const max = r.max ?? Infinity;
   const optMin = r.optMin ?? min;
   const optMax = r.optMax ?? max;
-  if (v < min || v > max) return "fuera";
-  if (v >= optMin && v <= optMax) return "optimo";
-  return "absoluto";
+  if (v < min || v > max) return "outside";
+  if (v >= optMin && v <= optMax) return "optimal";
+  return "absolute";
 }
 
-// Duración del ciclo en días: mínimo de FAO + 30 (criterio de Recocrop), salvo que min = max.
-function diasDelCiclo(c: CultivoEco): number | null {
+// Cycle length in days: FAO minimum + 30 (Recocrop criterion), unless min = max.
+function cycleDays(c: CropEco): number | null {
   const { min, max } = c.cicloDias;
   if (min === null) return max;
   if (max !== null && max === min) return min;
   return min + 30;
 }
 
-function ticksBonitos(min: number, max: number, aprox = 5): number[] {
-  const crudo = (max - min) / aprox;
-  const pot = Math.pow(10, Math.floor(Math.log10(crudo)));
-  const f = crudo / pot;
-  const paso = (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * pot;
-  const marcas: number[] = [];
-  for (let v = Math.ceil(min / paso) * paso; v <= max + 1e-9; v += paso) {
-    marcas.push(Number(v.toFixed(6)));
+function niceTicks(min: number, max: number, approx = 5): number[] {
+  const raw = (max - min) / approx;
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const f = raw / pow;
+  const step = (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * pow;
+  const marks: number[] = [];
+  for (let v = Math.ceil(min / step) * step; v <= max + 1e-9; v += step) {
+    marks.push(Number(v.toFixed(6)));
   }
-  return marcas;
+  return marks;
 }
 
-/* ---------------- Análisis y criterio ---------------- */
+/* ---------------- Analysis and criteria ---------------- */
 
-function analizar(curvas: Curva[], rango: Rango, nMeses: number): Analisis | null {
-  if (curvas.length === 0) return null;
-  const n = curvas.length;
+function analyze(curves: Curve[], range: Range, nMonths: number): Analysis | null {
+  if (curves.length === 0) return null;
+  const n = curves.length;
 
-  const porMes: StatMes[] = [];
-  for (let i = 0; i < nMeses; i++) {
-    const vals = curvas.map((c) => c.valores[i]);
-    const clases = vals.map((v) => clasificarRango(v, rango));
-    porMes.push({
+  const byMonth: MonthStat[] = [];
+  for (let i = 0; i < nMonths; i++) {
+    const vals = curves.map((c) => c.values[i]);
+    const classes = vals.map((v) => classifyRange(v, range));
+    byMonth.push({
       n,
-      ok: clases.filter((c) => c !== "fuera").length,
-      bajos: rango.min !== null ? vals.filter((v) => v < rango.min!).length : 0,
-      altos: rango.max !== null ? vals.filter((v) => v > rango.max!).length : 0,
-      mediana: mediana(vals),
+      ok: classes.filter((c) => c !== "outside").length,
+      low: range.min !== null ? vals.filter((v) => v < range.min!).length : 0,
+      high: range.max !== null ? vals.filter((v) => v > range.max!).length : 0,
+      median: median(vals),
     });
   }
 
-  const cicloOk = curvas.filter((c) => c.valores.every((v) => clasificarRango(v, rango) !== "fuera")).length;
+  const cycleOk = curves.filter((c) => c.values.every((v) => classifyRange(v, range) !== "outside")).length;
 
-  let critico: Analisis["critico"] = null;
-  let maxFallos = 0;
-  porMes.forEach((m, i) => {
-    const fallos = n - m.ok;
-    if (fallos > maxFallos) {
-      maxFallos = fallos;
-      critico = { mes: i, fallos };
+  let critical: Analysis["critical"] = null;
+  let maxFails = 0;
+  for (let i = 0; i < byMonth.length; i++) {
+    const fails = n - byMonth[i].ok;
+    if (fails > maxFails) {
+      maxFails = fails;
+      critical = { month: i, fails };
     }
-  });
+  }
 
-  return { n, curvas, porMes, cicloOk, critico };
+  return { n, curves, byMonth, cycleOk, critical };
 }
 
-function resumirLluvia(ciclos: number[][], rango: Rango, nMeses: number): ResumenLluvia | null {
-  if (ciclos.length === 0) return null;
-  const totales = ciclos.map((c) => c.reduce((s, v) => s + v, 0));
-  let secos = 0;
-  for (let i = 0; i < nMeses; i++) {
-    if (mediana(ciclos.map((c) => c[i])) < MES_SECO_MM) secos++;
+function summarizeRain(cycles: number[][], range: Range, nMonths: number): RainSummary | null {
+  if (cycles.length === 0) return null;
+  const totals = cycles.map((c) => c.reduce((s, v) => s + v, 0));
+  let dry = 0;
+  for (let i = 0; i < nMonths; i++) {
+    if (median(cycles.map((c) => c[i])) < DRY_MONTH_MM) dry++;
   }
   return {
-    n: totales.length,
-    mediana: mediana(totales),
-    p10: percentil(totales, 10),
-    p90: percentil(totales, 90),
-    ok: totales.filter((t) => clasificarRango(t, rango) !== "fuera").length,
-    secos,
+    n: totals.length,
+    median: median(totals),
+    p10: percentile(totals, 10),
+    p90: percentile(totals, 90),
+    ok: totals.filter((t) => classifyRange(t, range) !== "outside").length,
+    dry,
   };
 }
 
-// ET0 típica del ciclo (mediana de los totales). Solo informativa: no entra en el veredicto.
-function et0DelCiclo(ciclos: number[][]): number | null {
-  if (ciclos.length < MIN_ANIOS) return null;
-  return mediana(ciclos.map((c) => c.reduce((s, v) => s + v, 0)));
+// Typical cycle ET0 (median of the totals). Informational only: it does not enter the verdict.
+function cycleEt0(cycles: number[][]): number | null {
+  if (cycles.length < MIN_YEARS) return null;
+  return median(cycles.map((c) => c.reduce((s, v) => s + v, 0)));
 }
 
-function veredictoTemperatura(a: Analisis | null, rango: Rango): Veredicto {
-  if (!a || a.n < MIN_ANIOS) return "sin";
-  const medianaFuera = a.porMes.some((m) => clasificarRango(m.mediana, rango) === "fuera");
-  if (medianaFuera) return "no";
-  const parte = a.cicloOk / a.n;
-  if (parte >= UMBRAL_SI) return "si";
-  if (parte >= UMBRAL_CUIDADO) return "cuidado";
+function temperatureVerdict(a: Analysis | null, range: Range): Verdict {
+  if (!a || a.n < MIN_YEARS) return "none";
+  const medianOutside = a.byMonth.some((m) => classifyRange(m.median, range) === "outside");
+  if (medianOutside) return "no";
+  const share = a.cycleOk / a.n;
+  if (share >= YES_THRESHOLD) return "yes";
+  if (share >= CAUTION_THRESHOLD) return "caution";
   return "no";
 }
 
-const VER_DE_CLASE: Record<Clase, Veredicto> = { optimo: "si", absoluto: "cuidado", fuera: "no" };
+const VERDICT_OF_CLASS: Record<Class, Verdict> = { optimal: "yes", absolute: "caution", outside: "no" };
 
-const GRAV: Record<Veredicto, number> = { sin: -1, si: 0, cuidado: 1, no: 2 };
+const GRAVITY: Record<Verdict, number> = { none: -1, yes: 0, caution: 1, no: 2 };
 
-// Ley del mínimo: manda el peor factor evaluado.
-function peor(vs: Veredicto[]): Veredicto {
-  const ev = vs.filter((v) => v !== "sin");
-  if (ev.length === 0) return "sin";
-  return ev.reduce((a, b) => (GRAV[b] > GRAV[a] ? b : a));
+// Law of the minimum: the worst evaluated factor rules.
+function worst(vs: Verdict[]): Verdict {
+  const ev = vs.filter((v) => v !== "none");
+  if (ev.length === 0) return "none";
+  return ev.reduce((a, b) => (GRAVITY[b] > GRAVITY[a] ? b : a));
 }
 
-// Lluvia del ciclo: manda lo típico (mediana frente al rango) y se baja si pocos años cumplen.
-function veredictoLluvia(r: ResumenLluvia | null, rango: Rango): Veredicto {
-  if (!r || r.n < MIN_ANIOS) return "sin";
-  const porMediana = VER_DE_CLASE[clasificarRango(r.mediana, rango)];
-  const parte = r.ok / r.n;
-  const porAnios: Veredicto = parte >= UMBRAL_SI ? "si" : parte >= UMBRAL_CUIDADO ? "cuidado" : "no";
-  return peor([porMediana, porAnios]);
+// Cycle rainfall: the typical value rules (median vs range) and it is lowered if few years comply.
+function rainVerdict(r: RainSummary | null, range: Range): Verdict {
+  if (!r || r.n < MIN_YEARS) return "none";
+  const byMedian = VERDICT_OF_CLASS[classifyRange(r.median, range)];
+  const share = r.ok / r.n;
+  const byYears: Verdict = share >= YES_THRESHOLD ? "yes" : share >= CAUTION_THRESHOLD ? "caution" : "no";
+  return worst([byMedian, byYears]);
 }
 
-// La temperatura es la que define si hay datos suficientes: si ella no se pudo evaluar,
-// el resultado global solo se muestra si ya hay un "no" seguro por otro factor.
-function combinar(vTemp: Veredicto, ...otros: Veredicto[]): Veredicto {
-  const g = peor([vTemp, ...otros]);
-  if (vTemp === "sin" && g !== "no") return "sin";
+// Temperature decides whether there is enough data: if it could not be evaluated,
+// the overall result is only shown when another factor already gives a sure "no".
+function combine(vTemp: Verdict, ...others: Verdict[]): Verdict {
+  const g = worst([vTemp, ...others]);
+  if (vTemp === "none" && g !== "no") return "none";
   return g;
 }
 
-function nivelDeMes(m: StatMes): NivelMes {
-  const parte = m.ok / m.n;
-  if (parte >= UMBRAL_SI) return "bien";
-  if (parte >= UMBRAL_CUIDADO) return "justo";
-  return "riesgo";
+function monthLevel(m: MonthStat): MonthLevel {
+  const share = m.ok / m.n;
+  if (share >= YES_THRESHOLD) return "good";
+  if (share >= CAUTION_THRESHOLD) return "fair";
+  return "risk";
 }
 
-const TEXTO_NIVEL: Record<NivelMes, string> = { bien: "Bien", justo: "Justo", riesgo: "Riesgo" };
+// Evaluates any crop sown in a given month (same logic as the main analysis).
+// Used by the rotation suggestions.
+function evaluateCrop(
+  c: CropEco,
+  month: number,
+  power: PowerData | null,
+  era: EraData | null,
+  ph: SoilPh | null,
+  years: number[]
+): { nMonths: number; verdict: Verdict } | null {
+  const d = cycleDays(c);
+  if (!d || (!power && !era)) return null;
+  const nMonths = Math.max(1, Math.round(d / 30));
 
-/* ---------------- Suelo (SoilGrids) ---------------- */
+  const a = power ? analyze(monthlyCurves(power, month, nMonths, years), c.temperatura, nMonths) : null;
+  const rainRange = hasRange(c.lluviaAnual) ? c.lluviaAnual : null;
+  const rain =
+    era && rainRange ? summarizeRain(eraCycles(era, "rain", month, nMonths, years), rainRange, nMonths) : null;
+  const phRange = hasRange(c.ph) ? c.ph : null;
 
-// Espesor (cm) de las capas de SoilGrids usadas para el pH (0–30 cm)
-const ESPESOR_CAPA: Record<string, number> = { "0-5cm": 5, "5-15cm": 10, "15-30cm": 15 };
+  const vT = temperatureVerdict(a, c.temperatura);
+  const vR: Verdict = rainRange ? rainVerdict(rain, rainRange) : "none";
+  const vP: Verdict = phRange && ph ? VERDICT_OF_CLASS[classifyRange(ph.mean, phRange)] : "none";
+  return { nMonths, verdict: combine(vT, vP, vR) };
+}
 
-async function pedirPh(u: Ubicacion, signal: AbortSignal): Promise<PhSuelo> {
+/* ---------------- Soil (SoilGrids) ---------------- */
+
+// Thickness (cm) of the SoilGrids layers used for pH (0–30 cm)
+const LAYER_THICKNESS: Record<string, number> = { "0-5cm": 5, "5-15cm": 10, "15-30cm": 15 };
+
+async function fetchPh(p: Place, signal: AbortSignal): Promise<SoilPh> {
   const params = new URLSearchParams();
-  params.append("lon", String(u.lon));
-  params.append("lat", String(u.lat));
+  params.append("lon", String(p.lon));
+  params.append("lat", String(p.lat));
   params.append("property", "phh2o");
-  for (const d of Object.keys(ESPESOR_CAPA)) params.append("depth", d);
+  for (const d of Object.keys(LAYER_THICKNESS)) params.append("depth", d);
   for (const v of ["mean", "Q0.05", "Q0.95"]) params.append("value", v);
 
   let res: Response;
@@ -466,211 +526,237 @@ async function pedirPh(u: Ubicacion, signal: AbortSignal): Promise<PhSuelo> {
     });
   } catch (e) {
     if (e instanceof DOMException && e.name === "TimeoutError") {
-      throw new Error("SoilGrids tardó más de 30 segundos en responder.");
+      throw new Error("SoilGrids took more than 30 seconds to respond.");
     }
     throw e;
   }
-  if (!res.ok) throw new Error(`SoilGrids respondió con error ${res.status}`);
+  if (!res.ok) throw new Error(`SoilGrids responded with error ${res.status}`);
 
   const json = await res.json();
-  const capa = (json?.properties?.layers ?? []).find((l: { name?: string }) => l.name === "phh2o");
-  if (!capa) throw new Error("La respuesta de SoilGrids no tiene el formato esperado");
+  const layer = (json?.properties?.layers ?? []).find((l: { name?: string }) => l.name === "phh2o");
+  if (!layer) throw new Error("The SoilGrids response does not have the expected format");
 
-  const factor: number = capa.unit_measure?.d_factor ?? 10; // el pH viene multiplicado por 10
-  // Promedio ponderado por espesor de las capas 0–30 cm (aproximación para los percentiles).
-  const pesar = (clave: string): number | null => {
-    let suma = 0;
-    let peso = 0;
-    for (const prof of capa.depths ?? []) {
-      const e = ESPESOR_CAPA[prof.label as string];
-      const v = prof.values?.[clave];
+  const factor: number = layer.unit_measure?.d_factor ?? 10; // pH comes multiplied by 10
+  // Thickness-weighted average of the 0–30 cm layers (an approximation for the percentiles).
+  const weigh = (key: string): number | null => {
+    let sum = 0;
+    let weight = 0;
+    for (const depth of layer.depths ?? []) {
+      const e = LAYER_THICKNESS[depth.label as string];
+      const v = depth.values?.[key];
       if (e && typeof v === "number") {
-        suma += v * e;
-        peso += e;
+        sum += v * e;
+        weight += e;
       }
     }
-    return peso > 0 ? suma / peso / factor : null;
+    return weight > 0 ? sum / weight / factor : null;
   };
 
-  const media = pesar("mean");
-  const p5 = pesar("Q0.05");
-  const p95 = pesar("Q0.95");
-  if (media === null || p5 === null || p95 === null) {
-    throw new Error("SoilGrids no tiene pH para este punto.");
+  const mean = weigh("mean");
+  const p5 = weigh("Q0.05");
+  const p95 = weigh("Q0.95");
+  if (mean === null || p5 === null || p95 === null) {
+    throw new Error("SoilGrids has no pH for this point.");
   }
-  return { media: redondear(media), p5: redondear(p5), p95: redondear(p95) };
+  return { mean: round2(mean), p5: round2(p5), p95: round2(p95) };
 }
 
-/* ---------------- Colores del SVG (mantener en sync con analyze-my-crops.css) ---------------- */
+/* ---------------- SVG colors (keep in sync with analyze-my-crops.css) ---------------- */
 
 const C = {
-  tinta: "#243522",
-  suave: "#71806d",
-  linea: "#dfe8d7",
+  ink: "#243522",
+  soft: "#71806d",
+  line: "#dfe8d7",
   ideal: "#cfe5a3",
-  tolera: "#eaf3dc",
-  anios: "#397da4",
-  si: "#4f8f1f",
-  cuidado: "#bf8120",
+  tolerated: "#eaf3dc",
+  years: "#397da4",
+  yes: "#4f8f1f",
+  caution: "#bf8120",
   no: "#b3402a",
-  sin: "#8a9683",
+  none: "#8a9683",
 };
 
-const COLOR_VEREDICTO: Record<Veredicto, string> = { si: C.si, cuidado: C.cuidado, no: C.no, sin: C.sin };
-const COLOR_NIVEL: Record<NivelMes, string> = { bien: C.si, justo: C.cuidado, riesgo: C.no };
-const COLOR_CLASE: Record<Clase, string> = { optimo: C.si, absoluto: C.cuidado, fuera: C.no };
+const VERDICT_COLOR: Record<Verdict, string> = { yes: C.yes, caution: C.caution, no: C.no, none: C.none };
+const LEVEL_COLOR: Record<MonthLevel, string> = { good: C.yes, fair: C.caution, risk: C.no };
+const CLASS_COLOR: Record<Class, string> = { optimal: C.yes, absolute: C.caution, outside: C.no };
 
-/* ---------------- Gráfica de temperatura: todos los años + el año típico ---------------- */
+const VERDICT_LABEL: Record<Verdict, string> = {
+  yes: "Good to plant",
+  caution: "Plant with caution",
+  no: "Not recommended",
+  none: "Not enough data",
+};
 
-function GraficaTemperatura({ a, nombres, rango }: { a: Analisis; nombres: string[]; rango: Rango }) {
-  const n = nombres.length;
-  const W = 640;
-  const H = 280;
-  const M = { izq: 40, der: 14, arr: 14, abajo: 32 };
+/* ---------------- Temperature chart: every year + the typical year ---------------- */
 
-  const valores = a.curvas.flatMap((c) => c.valores);
-  const refs = [rango.optMin, rango.optMax].filter((v): v is number => v !== null);
-  const bajo = Math.min(...valores, ...refs);
-  const alto = Math.max(...valores, ...refs);
-  const pad = (alto - bajo) * 0.12 || 1;
-  const yMin = bajo - pad;
-  const yMax = alto + pad;
+// Same rendered height as VerticalGauge (300 * 200 / 180), so the three charts line up.
+const CHART_HEIGHT = 333;
 
-  const ancho = W - M.izq - M.der;
-  const alt = H - M.arr - M.abajo;
-  const x = (i: number) => M.izq + ((i + 0.5) / n) * ancho;
-  const y = (v: number) => M.arr + alt - ((v - yMin) / (yMax - yMin)) * alt;
-  const recortar = (v: number) => y(Math.min(Math.max(v, yMin), yMax));
+function TemperatureChart({ a, names, range }: { a: Analysis; names: string[]; range: Range }) {
+  const box = useRef<HTMLDivElement>(null);
+  const [W, setW] = useState(640);
 
-  const trazar = (vals: number[]) =>
+  // The chart adapts its width to the column, but keeps a fixed height.
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const update = () => setW(Math.max(280, Math.round(el.clientWidth)));
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const n = names.length;
+  const H = CHART_HEIGHT;
+  const M = { left: 40, right: 14, top: 14, bottom: 32 };
+
+  const values = a.curves.flatMap((c) => c.values);
+  const refs = [range.optMin, range.optMax].filter((v): v is number => v !== null);
+  const low = Math.min(...values, ...refs);
+  const high = Math.max(...values, ...refs);
+  const pad = (high - low) * 0.12 || 1;
+  const yMin = low - pad;
+  const yMax = high + pad;
+
+  const width = W - M.left - M.right;
+  const height = H - M.top - M.bottom;
+  const x = (i: number) => M.left + ((i + 0.5) / n) * width;
+  const y = (v: number) => M.top + height - ((v - yMin) / (yMax - yMin)) * height;
+  const clip = (v: number) => y(Math.min(Math.max(v, yMin), yMax));
+
+  const trace = (vals: number[]) =>
     vals.map((v, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(" ");
 
-  const topAbs = rango.max !== null ? recortar(rango.max) : M.arr;
-  const botAbs = rango.min !== null ? recortar(rango.min) : M.arr + alt;
-  const topOpt = rango.optMax !== null ? recortar(rango.optMax) : M.arr;
-  const botOpt = rango.optMin !== null ? recortar(rango.optMin) : M.arr + alt;
+  const topAbs = range.max !== null ? clip(range.max) : M.top;
+  const botAbs = range.min !== null ? clip(range.min) : M.top + height;
+  const topOpt = range.optMax !== null ? clip(range.optMax) : M.top;
+  const botOpt = range.optMin !== null ? clip(range.optMin) : M.top + height;
 
-  const ticks = ticksBonitos(yMin, yMax, 4);
-  const limiteVisible = (v: number | null) => v !== null && v > yMin && v < yMax;
+  const ticks = niceTicks(yMin, yMax, 5);
+  const visibleLimit = (v: number | null) => v !== null && v > yMin && v < yMax;
 
   return (
-    <svg
-      viewBox={`0 0 ${W} ${H}`}
-      role="img"
-      aria-label="Temperatura mes a mes durante el ciclo en cada año pasado, frente al rango que tolera el cultivo"
-      style={{ width: "100%", height: "auto", display: "block" }}
-    >
-      <rect x={M.izq} y={topAbs} width={ancho} height={Math.max(0, botAbs - topAbs)} fill={C.tolera} />
-      <rect x={M.izq} y={topOpt} width={ancho} height={Math.max(0, botOpt - topOpt)} fill={C.ideal} />
+    <div ref={box} style={{ width: "100%" }}>
+      <svg
+        width={W}
+        height={H}
+        viewBox={`0 0 ${W} ${H}`}
+        role="img"
+        aria-label="Month-by-month temperature during the cycle in each past year, against the range the crop tolerates"
+        style={{ display: "block", maxWidth: "100%" }}
+      >
+        <rect x={M.left} y={topAbs} width={width} height={Math.max(0, botAbs - topAbs)} fill={C.tolerated} />
+        <rect x={M.left} y={topOpt} width={width} height={Math.max(0, botOpt - topOpt)} fill={C.ideal} />
 
-      {ticks.map((t) => (
-        <g key={t}>
-          <line x1={M.izq} x2={M.izq + ancho} y1={y(t)} y2={y(t)} stroke={C.linea} strokeWidth={1} />
-          <text x={M.izq - 8} y={y(t) + 4} textAnchor="end" fontSize={11} fill={C.suave}>
-            {formatear(t)}°
+        {ticks.map((t) => (
+          <g key={t}>
+            <line x1={M.left} x2={M.left + width} y1={y(t)} y2={y(t)} stroke={C.line} strokeWidth={1} />
+            <text x={M.left - 8} y={y(t) + 4} textAnchor="end" fontSize={11} fill={C.soft}>
+              {fmt(t)}°
+            </text>
+          </g>
+        ))}
+
+        {visibleLimit(range.max) && (
+          <g>
+            <line x1={M.left} x2={M.left + width} y1={y(range.max!)} y2={y(range.max!)} stroke={C.no} strokeDasharray="5 4" />
+            <text x={M.left + width - 4} y={y(range.max!) - 5} textAnchor="end" fontSize={11} fill={C.no}>
+              max tolerated: {fmt(range.max!)} °C
+            </text>
+          </g>
+        )}
+        {visibleLimit(range.min) && (
+          <g>
+            <line x1={M.left} x2={M.left + width} y1={y(range.min!)} y2={y(range.min!)} stroke={C.no} strokeDasharray="5 4" />
+            <text x={M.left + width - 4} y={y(range.min!) + 14} textAnchor="end" fontSize={11} fill={C.no}>
+              min tolerated: {fmt(range.min!)} °C
+            </text>
+          </g>
+        )}
+
+        {names.map((name, i) => (
+          <text key={i} x={x(i)} y={H - 10} textAnchor="middle" fontSize={11} fill={C.soft}>
+            {name.slice(0, 3)}
           </text>
-        </g>
-      ))}
+        ))}
 
-      {limiteVisible(rango.max) && (
-        <g>
-          <line x1={M.izq} x2={M.izq + ancho} y1={y(rango.max!)} y2={y(rango.max!)} stroke={C.no} strokeDasharray="5 4" />
-          <text x={M.izq + ancho - 4} y={y(rango.max!) - 5} textAnchor="end" fontSize={11} fill={C.no}>
-            máximo que tolera: {formatear(rango.max!)} °C
-          </text>
-        </g>
-      )}
-      {limiteVisible(rango.min) && (
-        <g>
-          <line x1={M.izq} x2={M.izq + ancho} y1={y(rango.min!)} y2={y(rango.min!)} stroke={C.no} strokeDasharray="5 4" />
-          <text x={M.izq + ancho - 4} y={y(rango.min!) + 14} textAnchor="end" fontSize={11} fill={C.no}>
-            mínimo que tolera: {formatear(rango.min!)} °C
-          </text>
-        </g>
-      )}
+        {/* every past year, faint */}
+        {a.curves.map((c) => (
+          <path
+            key={c.sowYear}
+            d={trace(c.values)}
+            fill="none"
+            stroke={C.years}
+            strokeOpacity={0.22}
+            strokeWidth={1.6}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+          >
+            <title>{`Sown in ${c.sowYear}`}</title>
+          </path>
+        ))}
 
-      {nombres.map((nom, i) => (
-        <text key={i} x={x(i)} y={H - 10} textAnchor="middle" fontSize={11} fill={C.suave}>
-          {nom.slice(0, 3)}
-        </text>
-      ))}
-
-      {/* cada año pasado, tenue */}
-      {a.curvas.map((c) => (
-        <path
-          key={c.anioSiembra}
-          d={trazar(c.valores)}
-          fill="none"
-          stroke={C.anios}
-          strokeOpacity={0.22}
-          strokeWidth={1.6}
-          strokeLinejoin="round"
-          strokeLinecap="round"
-        >
-          <title>{`Siembra ${c.anioSiembra}`}</title>
-        </path>
-      ))}
-
-      {/* el año típico */}
-      <path d={trazar(a.porMes.map((m) => m.mediana))} fill="none" stroke={C.tinta} strokeWidth={2.6} strokeLinejoin="round" strokeLinecap="round" />
-      {a.porMes.map((m, i) => (
-        <circle key={i} cx={x(i)} cy={y(m.mediana)} r={5} fill={COLOR_NIVEL[nivelDeMes(m)]} stroke="#fff" strokeWidth={2}>
-          <title>{`${nombres[i]}: lo típico es ${formatear(m.mediana, 1)} °C`}</title>
-        </circle>
-      ))}
-    </svg>
+        {/* the typical year */}
+        <path d={trace(a.byMonth.map((m) => m.median))} fill="none" stroke={C.ink} strokeWidth={2.6} strokeLinejoin="round" strokeLinecap="round" />
+        {a.byMonth.map((m, i) => (
+          <circle key={i} cx={x(i)} cy={y(m.median)} r={5} fill={LEVEL_COLOR[monthLevel(m)]} stroke="#fff" strokeWidth={2}>
+            <title>{`${names[i]}: typically ${fmt(m.median, 1)} °C`}</title>
+          </circle>
+        ))}
+      </svg>
+    </div>
   );
 }
 
-/* ---------------- Medidor vertical: un valor del lugar frente al rango del cultivo ---------------- */
-/* Sirve para el pH y para la lluvia del ciclo: no llevan eje de tiempo. */
-
-function MedidorVertical({
-  valor,
-  bajo,
-  alto,
-  rango,
+/* ---------------- Vertical gauge: one value of the place against the crop range ---------------- */
+/* Used for pH and for cycle rainfall: they have no time axis. */
+function VerticalGauge({
+  value,
+  low,
+  high,
+  range,
   dec,
-  desdeCero,
+  fromZero,
   aria,
-  tooltipValor,
-  tooltipRango,
+  valueTooltip,
+  rangeTooltip,
 }: {
-  valor: number;
-  bajo: number;
-  alto: number;
-  rango: Rango;
+  value: number;
+  low: number;
+  high: number;
+  range: Range;
   dec: number;
-  desdeCero?: boolean;
+  fromZero?: boolean;
   aria: string;
-  tooltipValor: string;
-  tooltipRango: string;
+  valueTooltip: string;
+  rangeTooltip: string;
 }) {
   const W = 180;
   const H = 300;
-  const M = { izq: 46, arr: 14, abajo: 14 };
-  const barX = M.izq;
+  const M = { left: 46, top: 14, bottom: 14 };
+  const barX = M.left;
   const barW = 60;
-  const alt = H - M.arr - M.abajo;
+  const height = H - M.top - M.bottom;
 
-  const puntos = [valor, bajo, alto, rango.min, rango.optMin, rango.optMax, rango.max].filter(
+  const points = [value, low, high, range.min, range.optMin, range.optMax, range.max].filter(
     (v): v is number => v !== null
   );
-  const lo = Math.min(...puntos);
-  const hi = Math.max(...puntos);
+  const lo = Math.min(...points);
+  const hi = Math.max(...points);
   const pad = (hi - lo) * 0.08 || 0.5;
-  const a = desdeCero ? Math.max(0, lo - pad) : lo - pad;
+  const a = fromZero ? Math.max(0, lo - pad) : lo - pad;
   const b = hi + pad;
 
-  const y = (v: number) => M.arr + alt - ((v - a) / (b - a)) * alt;
-  const rec = (v: number) => y(Math.min(Math.max(v, a), b));
+  const y = (v: number) => M.top + height - ((v - a) / (b - a)) * height;
+  const clip = (v: number) => y(Math.min(Math.max(v, a), b));
 
-  const topAbs = rango.max !== null ? rec(rango.max) : M.arr;
-  const botAbs = rango.min !== null ? rec(rango.min) : M.arr + alt;
-  const topOpt = rango.optMax !== null ? rec(rango.optMax) : M.arr;
-  const botOpt = rango.optMin !== null ? rec(rango.optMin) : M.arr + alt;
-  const color = COLOR_CLASE[clasificarRango(valor, rango)];
-  const ticks = ticksBonitos(a, b, 5);
+  const topAbs = range.max !== null ? clip(range.max) : M.top;
+  const botAbs = range.min !== null ? clip(range.min) : M.top + height;
+  const topOpt = range.optMax !== null ? clip(range.optMax) : M.top;
+  const botOpt = range.optMin !== null ? clip(range.optMin) : M.top + height;
+  const color = CLASS_COLOR[classifyRange(value, range)];
+  const ticks = niceTicks(a, b, 5);
   const cx = barX + barW / 2;
 
   return (
@@ -680,55 +766,117 @@ function MedidorVertical({
       aria-label={aria}
       style={{ width: "100%", maxWidth: 200, height: "auto", display: "block", margin: "0 auto" }}
     >
-      <rect x={barX} y={topAbs} width={barW} height={Math.max(0, botAbs - topAbs)} fill={C.tolera} />
+      <rect x={barX} y={topAbs} width={barW} height={Math.max(0, botAbs - topAbs)} fill={C.tolerated} />
       <rect x={barX} y={topOpt} width={barW} height={Math.max(0, botOpt - topOpt)} fill={C.ideal} />
 
       {ticks.map((t) => (
         <g key={t}>
-          <line x1={barX - 5} x2={barX} y1={y(t)} y2={y(t)} stroke={C.suave} />
-          <text x={barX - 8} y={y(t) + 4} textAnchor="end" fontSize={11} fill={C.suave}>
-            {formatear(t, dec)}
+          <line x1={barX - 5} x2={barX} y1={y(t)} y2={y(t)} stroke={C.soft} />
+          <text x={barX - 8} y={y(t) + 4} textAnchor="end" fontSize={11} fill={C.soft}>
+            {fmt(t, dec)}
           </text>
         </g>
       ))}
 
-      {rango.max !== null && (
+      {range.max !== null && (
         <g>
-          <line x1={barX - 4} x2={barX + barW + 4} y1={rec(rango.max)} y2={rec(rango.max)} stroke={C.no} strokeDasharray="5 4" />
-          <text x={barX + barW + 8} y={rec(rango.max) + 4} fontSize={11} fill={C.no}>
-            máx. {formatear(rango.max, dec)}
+          <line x1={barX - 4} x2={barX + barW + 4} y1={clip(range.max)} y2={clip(range.max)} stroke={C.no} strokeDasharray="5 4" />
+          <text x={barX + barW + 8} y={clip(range.max) + 4} fontSize={11} fill={C.no}>
+            max. {fmt(range.max, dec)}
           </text>
         </g>
       )}
-      {rango.min !== null && (
+      {range.min !== null && (
         <g>
-          <line x1={barX - 4} x2={barX + barW + 4} y1={rec(rango.min)} y2={rec(rango.min)} stroke={C.no} strokeDasharray="5 4" />
-          <text x={barX + barW + 8} y={rec(rango.min) + 4} fontSize={11} fill={C.no}>
-            mín. {formatear(rango.min, dec)}
+          <line x1={barX - 4} x2={barX + barW + 4} y1={clip(range.min)} y2={clip(range.min)} stroke={C.no} strokeDasharray="5 4" />
+          <text x={barX + barW + 8} y={clip(range.min) + 4} fontSize={11} fill={C.no}>
+            min. {fmt(range.min, dec)}
           </text>
         </g>
       )}
 
-      <line x1={cx} x2={cx} y1={y(alto)} y2={y(bajo)} stroke={color} strokeWidth={5} strokeOpacity={0.55} strokeLinecap="round">
-        <title>{tooltipRango}</title>
+      <line x1={cx} x2={cx} y1={y(high)} y2={y(low)} stroke={color} strokeWidth={5} strokeOpacity={0.55} strokeLinecap="round">
+        <title>{rangeTooltip}</title>
       </line>
-      <circle cx={cx} cy={y(valor)} r={9} fill={color} stroke="#fff" strokeWidth={3}>
-        <title>{tooltipValor}</title>
+      <circle cx={cx} cy={y(value)} r={9} fill={color} stroke="#fff" strokeWidth={3}>
+        <title>{valueTooltip}</title>
       </circle>
     </svg>
   );
 }
 
-/* ---------------- Búsqueda de lugares (Open-Meteo Geocoding) ---------------- */
+/* ---------------- Water balance: rainfall (bars) vs ET0 (line), typical year ---------------- */
 
-async function buscarCiudades(texto: string, signal: AbortSignal): Promise<ResultadoGeo[]> {
-  const params = new URLSearchParams({ name: texto, count: "6", language: "es", format: "json" });
+function WaterBalanceChart({ rain, et0, names }: { rain: number[]; et0: number[] | null; names: string[] }) {
+  const n = names.length;
+  const W = 460;
+  const H = 150;
+  const M = { left: 36, right: 8, top: 8, bottom: 22 };
+  const width = W - M.left - M.right;
+  const height = H - M.top - M.bottom;
+  const top = Math.max(...rain, ...(et0 ?? [0]), 1) * 1.1;
+  const y = (v: number) => M.top + height - (v / top) * height;
+  const step = width / n;
+  const bw = Math.min(30, step * 0.6);
+  const x = (i: number) => M.left + step * (i + 0.5);
+  const ticks = niceTicks(0, top, 3);
+
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      role="img"
+      aria-label="Monthly rainfall against potential evaporation during the cycle"
+      style={{ width: "100%", height: "auto", display: "block" }}
+    >
+      {ticks.map((t) => (
+        <g key={t}>
+          <line x1={M.left} x2={M.left + width} y1={y(t)} y2={y(t)} stroke={C.line} />
+          <text x={M.left - 8} y={y(t) + 4} textAnchor="end" fontSize={11} fill={C.soft}>
+            {fmt(t)}
+          </text>
+        </g>
+      ))}
+      {rain.map((v, i) => (
+        <rect key={i} x={x(i) - bw / 2} y={y(v)} width={bw} height={Math.max(0, y(0) - y(v))} rx={3} fill={C.years} fillOpacity={0.75}>
+          <title>{`${names[i]}: ${fmt(v)} mm of rain`}</title>
+        </rect>
+      ))}
+      {et0 && (
+        <>
+          <path
+            d={et0.map((v, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(" ")}
+            fill="none"
+            stroke={C.caution}
+            strokeWidth={2.6}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+          />
+          {et0.map((v, i) => (
+            <circle key={i} cx={x(i)} cy={y(v)} r={4} fill={C.caution} stroke="#fff" strokeWidth={2}>
+              <title>{`${names[i]}: ${fmt(v)} mm of ET0`}</title>
+            </circle>
+          ))}
+        </>
+      )}
+      {names.map((name, i) => (
+        <text key={i} x={x(i)} y={H - 9} textAnchor="middle" fontSize={11} fill={C.soft}>
+          {name.slice(0, 3)}
+        </text>
+      ))}
+    </svg>
+  );
+}
+
+/* ---------------- Place search (Open-Meteo Geocoding) ---------------- */
+
+async function searchPlaces(text: string, signal: AbortSignal): Promise<GeoResult[]> {
+  const params = new URLSearchParams({ name: text, count: "6", language: "en", format: "json" });
   const res = await fetch(`https://geocoding-api.open-meteo.com/v1/search?${params.toString()}`, {
     signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]),
   });
-  if (!res.ok) throw new Error(`El buscador de lugares respondió con error ${res.status}`);
+  if (!res.ok) throw new Error(`The place search responded with error ${res.status}`);
   const json = await res.json();
-  const lista: {
+  const list: {
     id: number;
     name: string;
     latitude: number;
@@ -736,97 +884,97 @@ async function buscarCiudades(texto: string, signal: AbortSignal): Promise<Resul
     admin1?: string;
     country?: string;
   }[] = Array.isArray(json?.results) ? json.results : [];
-  return lista.map((r) => ({
+  return list.map((r) => ({
     id: r.id,
-    nombre: [r.name, r.admin1, r.country].filter(Boolean).join(", "),
-    lat: redondear(r.latitude),
-    lon: redondear(r.longitude),
+    name: [r.name, r.admin1, r.country].filter(Boolean).join(", "),
+    lat: round2(r.latitude),
+    lon: round2(r.longitude),
   }));
 }
 
-/* ---------------- Buscador con sugerencias mientras escribís ---------------- */
+/* ---------------- Search box with suggestions while typing ---------------- */
 
-function BuscadorLugar({ onElegir }: { onElegir: (u: Ubicacion) => void }) {
-  const [texto, setTexto] = useState("");
-  const [sugerencias, setSugerencias] = useState<ResultadoGeo[]>([]);
-  const [buscando, setBuscando] = useState(false);
-  const [sinResultados, setSinResultados] = useState(false);
+function PlaceSearch({ onPick }: { onPick: (p: Place) => void }) {
+  const [text, setText] = useState("");
+  const [suggestions, setSuggestions] = useState<GeoResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [noResults, setNoResults] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [abierto, setAbierto] = useState(false);
+  const [open, setOpen] = useState(false);
 
   useEffect(() => {
-    const q = texto.trim();
+    const q = text.trim();
     if (q.length < 2) {
-      setSugerencias([]);
-      setSinResultados(false);
-      setBuscando(false);
+      setSuggestions([]);
+      setNoResults(false);
+      setSearching(false);
       return;
     }
-    const controlador = new AbortController();
-    const espera = setTimeout(() => {
-      setBuscando(true);
+    const controller = new AbortController();
+    const wait = setTimeout(() => {
+      setSearching(true);
       setError(null);
-      buscarCiudades(q, controlador.signal)
+      searchPlaces(q, controller.signal)
         .then((r) => {
-          setSugerencias(r);
-          setSinResultados(r.length === 0);
+          setSuggestions(r);
+          setNoResults(r.length === 0);
         })
         .catch((e: unknown) => {
           if (e instanceof DOMException && e.name === "AbortError") return;
-          setSugerencias([]);
-          setError(e instanceof Error ? e.message : "No se pudo buscar el lugar.");
+          setSuggestions([]);
+          setError(e instanceof Error ? e.message : "Could not search for the place.");
         })
         .finally(() => {
-          if (!controlador.signal.aborted) setBuscando(false);
+          if (!controller.signal.aborted) setSearching(false);
         });
     }, 300);
     return () => {
-      clearTimeout(espera);
-      controlador.abort();
+      clearTimeout(wait);
+      controller.abort();
     };
-  }, [texto]);
+  }, [text]);
 
-  function elegir(r: ResultadoGeo) {
-    onElegir({ nombre: r.nombre, lat: r.lat, lon: r.lon });
-    setTexto("");
-    setSugerencias([]);
-    setAbierto(false);
+  function pick(r: GeoResult) {
+    onPick({ name: r.name, lat: r.lat, lon: r.lon });
+    setText("");
+    setSuggestions([]);
+    setOpen(false);
   }
 
   return (
-    <div className="cm-buscador">
+    <div className="cm-searchbox">
       <input
         type="text"
-        value={texto}
-        placeholder="Buscar pueblo o lugar"
-        aria-label="Buscar pueblo o lugar"
+        value={text}
+        placeholder="Search for a town or place"
+        aria-label="Search for a town or place"
         autoComplete="off"
         onChange={(e) => {
-          setTexto(e.target.value);
-          setAbierto(true);
+          setText(e.target.value);
+          setOpen(true);
         }}
-        onFocus={() => setAbierto(true)}
-        onBlur={() => setAbierto(false)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && sugerencias[0]) elegir(sugerencias[0]);
-          if (e.key === "Escape") setAbierto(false);
+          if (e.key === "Enter" && suggestions[0]) pick(suggestions[0]);
+          if (e.key === "Escape") setOpen(false);
         }}
       />
-      {abierto && texto.trim().length >= 2 && (
+      {open && text.trim().length >= 2 && (
         <ul className="cm-sug" role="listbox">
-          {buscando && sugerencias.length === 0 && <li className="cm-sug-info">Buscando…</li>}
-          {sinResultados && !buscando && <li className="cm-sug-info">No se encontró ese lugar.</li>}
+          {searching && suggestions.length === 0 && <li className="cm-sug-info">Searching…</li>}
+          {noResults && !searching && <li className="cm-sug-info">Place not found.</li>}
           {error && <li className="cm-sug-info cm-error">{error}</li>}
-          {sugerencias.map((r) => (
+          {suggestions.map((r) => (
             <li key={r.id} role="option" aria-selected={false}>
               <button
                 type="button"
                 onMouseDown={(e) => {
                   e.preventDefault();
-                  elegir(r);
+                  pick(r);
                 }}
               >
-                {r.nombre}
+                {r.name}
               </button>
             </li>
           ))}
@@ -836,825 +984,1039 @@ function BuscadorLugar({ onElegir }: { onElegir: (u: Ubicacion) => void }) {
   );
 }
 
-/* ---------------- Mapa: tocá un punto para elegir ---------------- */
-/* Leaflet se carga desde un CDN la primera vez; no hay que instalar nada. */
+/* ---------------- Map: realistic globe that turns into a sketch map when zoomed in ---------------- */
+/* MapLibre GL is loaded from a CDN the first time; nothing to install.
+   From far away you see the real Earth (NASA Blue Marble). At country scale that layer
+   fades out and the light sketch map (OpenFreeMap / OpenStreetMap) remains. */
 
-const LEAFLET_JS = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js";
-const LEAFLET_CSS = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css";
+const MAPLIBRE_JS = "https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js";
+const MAPLIBRE_CSS = "https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css";
+// Light, minimalist sketch map (OpenFreeMap + OpenStreetMap), no API key
+const MAP_STYLE = "https://tiles.openfreemap.org/styles/positron";
+// Realistic Earth (NASA GIBS, public domain), no API key.
+// In epsg3857 the tile matrix set of this layer is GoogleMapsCompatible_Level8 (zoom 0–8).
+const REAL_EARTH =
+  "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/BlueMarble_ShadedRelief_Bathymetry/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpeg";
+
+const INITIAL_ZOOM = 0.9; // almost the whole globe
+const PLACE_ZOOM = 5.5; // when a place is picked, zoom in to the sketch map
+const REAL_UNTIL_ZOOM = 3.5; // up to here only the real Earth is visible
+const SKETCH_FROM_ZOOM = 5.5; // from here only the sketch map is visible (both blend in between)
+
+const MAP_TEXTS = {
+  "CooperativeGesturesHandler.WindowsHelpText": "Use Ctrl + scroll to zoom",
+  "CooperativeGesturesHandler.MacHelpText": "Use ⌘ + scroll to zoom",
+  "CooperativeGesturesHandler.MobileHelpText": "Use two fingers to move the map",
+};
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-let leafletPromesa: Promise<any> | null = null;
+let maplibrePromise: Promise<any> | null = null;
 
-function cargarLeaflet(): Promise<any> {
+function loadMapLibre(): Promise<any> {
   const w = window as any;
-  if (w.L) return Promise.resolve(w.L);
-  if (leafletPromesa) return leafletPromesa;
+  if (w.maplibregl) return Promise.resolve(w.maplibregl);
+  if (maplibrePromise) return maplibrePromise;
 
-  leafletPromesa = new Promise((resolve, reject) => {
-    if (!document.getElementById("leaflet-css")) {
+  maplibrePromise = new Promise((resolve, reject) => {
+    if (!document.getElementById("maplibre-css")) {
       const css = document.createElement("link");
-      css.id = "leaflet-css";
+      css.id = "maplibre-css";
       css.rel = "stylesheet";
-      css.href = LEAFLET_CSS;
+      css.href = MAPLIBRE_CSS;
       document.head.appendChild(css);
     }
     const s = document.createElement("script");
-    s.src = LEAFLET_JS;
+    s.src = MAPLIBRE_JS;
     s.async = true;
-    s.onload = () => resolve((window as any).L);
+    s.onload = () => resolve((window as any).maplibregl);
     s.onerror = () => {
-      leafletPromesa = null;
+      maplibrePromise = null;
       s.remove();
-      reject(new Error("No se pudo cargar el mapa. Revisá tu conexión; podés seguir buscando el lugar por nombre."));
+      reject(new Error("Could not load the map. Check your connection; you can still search for the place by name."));
     };
     document.head.appendChild(s);
   });
-  return leafletPromesa;
+  return maplibrePromise;
 }
 
-function Mapa({ ubicacion, onElegir }: { ubicacion: Ubicacion; onElegir: (u: Ubicacion) => void }) {
-  const contenedor = useRef<HTMLDivElement>(null);
-  const mapaRef = useRef<any>(null);
-  const marcadorRef = useRef<any>(null);
-  const ubicacionRef = useRef(ubicacion);
-  const onElegirRef = useRef(onElegir);
-  ubicacionRef.current = ubicacion;
-  onElegirRef.current = onElegir;
-  const [errorMapa, setErrorMapa] = useState<string | null>(null);
+function GlobeMap({ place, onPick }: { place: Place; onPick: (p: Place) => void }) {
+  const container = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<any>(null);
+  const markerRef = useRef<any>(null);
+  const placeRef = useRef(place);
+  const onPickRef = useRef(onPick);
+  const lastClick = useRef<string | null>(null);
+  placeRef.current = place;
+  onPickRef.current = onPick;
+  const [mapError, setMapError] = useState<string | null>(null);
 
-  // Crear el mapa una sola vez
+  // Create the map only once
   useEffect(() => {
-    let cancelado = false;
-    let limpiar: (() => void) | null = null;
+    let cancelled = false;
+    let cleanup: (() => void) | null = null;
 
-    cargarLeaflet()
-      .then((L) => {
-        if (cancelado || !contenedor.current) return;
-        const u = ubicacionRef.current;
+    loadMapLibre()
+      .then((ml) => {
+        if (cancelled || !container.current) return;
+        const p = placeRef.current;
+        // On touch screens two fingers are required to move the map, so page scrolling is not blocked.
+        const isTouch = window.matchMedia("(pointer: coarse)").matches;
 
-        const mapa = L.map(contenedor.current, {
-          center: [u.lat, u.lon],
-          zoom: 8,
-          scrollWheelZoom: false,
-          worldCopyJump: true,
-        });
-        L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-          maxZoom: 18,
-          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-        }).addTo(mapa);
-
-        const marcador = L.circleMarker([u.lat, u.lon], {
-          radius: 10,
-          color: "#ffffff",
-          weight: 3,
-          fillColor: C.si,
-          fillOpacity: 1,
-        }).addTo(mapa);
-
-        mapa.on("click", (e: any) => {
-          const p = e.latlng.wrap();
-          onElegirRef.current({
-            nombre: "Punto elegido en el mapa",
-            lat: redondear(p.lat),
-            lon: redondear(p.lng),
-          });
+        const map = new ml.Map({
+          container: container.current,
+          style: MAP_STYLE,
+          center: [p.lon, p.lat],
+          zoom: INITIAL_ZOOM,
+          minZoom: 0,
+          maxZoom: 16,
+          attributionControl: false, // the credit is shown outside the circle
+          cooperativeGestures: isTouch,
+          locale: MAP_TEXTS,
         });
 
-        mapaRef.current = mapa;
-        marcadorRef.current = marcador;
-        limpiar = () => {
-          mapa.remove();
-          mapaRef.current = null;
-          marcadorRef.current = null;
+        map.on("style.load", () => {
+          map.setProjection({ type: "globe" });
+
+          // Real Earth layer above the sketch map and below the labels.
+          // It fades out at country scale and reveals the sketch map.
+          if (!map.getSource("real-earth")) {
+            map.addSource("real-earth", {
+              type: "raster",
+              tiles: [REAL_EARTH],
+              tileSize: 256,
+              maxzoom: 8,
+            });
+            const firstLabel = (map.getStyle().layers as any[]).find((l) => l.type === "symbol")?.id;
+            map.addLayer(
+              {
+                id: "real-earth",
+                type: "raster",
+                source: "real-earth",
+                maxzoom: SKETCH_FROM_ZOOM + 0.2,
+                paint: {
+                  "raster-opacity": ["interpolate", ["linear"], ["zoom"], REAL_UNTIL_ZOOM, 1, SKETCH_FROM_ZOOM, 0],
+                  "raster-fade-duration": 150,
+                },
+              },
+              firstLabel
+            );
+          }
+        });
+
+        // A failed tile of the real Earth layer must not break or flood the console:
+        // the sketch map underneath keeps working.
+        map.on("error", (e: any) => {
+          if (e?.sourceId === "real-earth") return;
+          console.error(e?.error ?? e);
+        });
+
+        map.scrollZoom?.setWheelZoomRate?.(1 / 250); // slightly more responsive wheel
+
+        const pin = document.createElement("div");
+        pin.className = "cm-pin";
+        const marker = new ml.Marker({ element: pin }).setLngLat([p.lon, p.lat]).addTo(map);
+
+        map.on("click", (e: any) => {
+          const lng = ((((e.lngLat.lng + 180) % 360) + 360) % 360) - 180;
+          const picked = { name: "Point picked on the map", lat: round2(e.lngLat.lat), lon: round2(lng) };
+          lastClick.current = `${picked.lat},${picked.lon}`;
+          onPickRef.current(picked);
+        });
+
+        mapRef.current = map;
+        markerRef.current = marker;
+        cleanup = () => {
+          map.remove();
+          mapRef.current = null;
+          markerRef.current = null;
         };
       })
       .catch((e: unknown) => {
-        if (!cancelado) setErrorMapa(e instanceof Error ? e.message : "No se pudo cargar el mapa.");
+        if (!cancelled) setMapError(e instanceof Error ? e.message : "Could not load the map.");
       });
 
     return () => {
-      cancelado = true;
-      limpiar?.();
+      cancelled = true;
+      cleanup?.();
     };
   }, []);
 
-  // Mover el marcador cuando cambia la ubicación (búsqueda, GPS o clic)
+  // Move the marker when the place changes (search, GPS or click)
   useEffect(() => {
-    const mapa = mapaRef.current;
-    const marcador = marcadorRef.current;
-    if (!mapa || !marcador) return;
-    marcador.setLatLng([ubicacion.lat, ubicacion.lon]);
-    mapa.setView([ubicacion.lat, ubicacion.lon], Math.max(mapa.getZoom(), 8));
-  }, [ubicacion.lat, ubicacion.lon]);
+    const map = mapRef.current;
+    const marker = markerRef.current;
+    if (!map || !marker) return;
+    marker.setLngLat([place.lon, place.lat]);
+    // if it came from a click on the map, do not recenter (the user is already looking there)
+    if (lastClick.current === `${place.lat},${place.lon}`) {
+      lastClick.current = null;
+      return;
+    }
+    map.easeTo({
+      center: [place.lon, place.lat],
+      zoom: Math.max(map.getZoom(), PLACE_ZOOM),
+      duration: 1400,
+    });
+  }, [place.lat, place.lon]);
 
-  if (errorMapa) {
+  if (mapError) {
     return (
-      <div className="cm-mapa cm-mapa-error">
-        <p className="cm-error">{errorMapa}</p>
+      <div className="cm-globe-wrap">
+        <div className="cm-globe-error">
+          <p className="cm-error">{mapError}</p>
+        </div>
       </div>
     );
   }
 
-  return <div ref={contenedor} className="cm-mapa" role="application" aria-label="Mapa para elegir el lugar de siembra" />;
+  return (
+    <div className="cm-globe-wrap">
+      <div ref={container} className="cm-globe" role="application" aria-label="Globe to pick the planting location" />
+      <div className="cm-zoom">
+        <button type="button" aria-label="Zoom in" onClick={() => mapRef.current?.zoomIn()}>
+          +
+        </button>
+        <button type="button" aria-label="Zoom out" onClick={() => mapRef.current?.zoomOut()}>
+          −
+        </button>
+      </div>
+    </div>
+  );
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
-/* ---------------- Página ---------------- */
+/* ---------------- Status badge inside the title of each chart ---------------- */
+
+const FACTOR_LABEL: Record<Verdict, string> = {
+  yes: "Ideal",
+  caution: "Tolerable",
+  no: "Out of range",
+  none: "No data",
+};
+
+function Badge({ v, text }: { v: Verdict; text: string }) {
+  return (
+    <span className="cm-badge">
+      <span className="cm-dot" style={{ background: VERDICT_COLOR[v] }} />
+      {text}
+    </span>
+  );
+}
+
+/* ---------------- Page ---------------- */
 
 export default function AnalyzeMyCropsPage() {
-  const [ubicacion, setUbicacion] = useState<Ubicacion>(UBICACION_INICIAL);
-  const [intento, setIntento] = useState(0);
-  const [resultado, setResultado] = useState<Resultado | null>(null); // NASA POWER
-  const [eraRes, setEraRes] = useState<Extra<DatosEra> | null>(null); // ERA5
-  const [phRes, setPhRes] = useState<Extra<PhSuelo> | null>(null);
-  const [buscandoGps, setBuscandoGps] = useState(false);
-  const [errorGps, setErrorGps] = useState<string | null>(null);
+  const [place, setPlace] = useState<Place>(INITIAL_PLACE);
+  const [attempt, setAttempt] = useState(0);
+  const [powerResult, setPowerResult] = useState<PowerResult | null>(null); // NASA POWER
+  const [eraRes, setEraRes] = useState<Extra<EraData> | null>(null); // ERA5
+  const [phRes, setPhRes] = useState<Extra<SoilPh> | null>(null);
+  const [gpsLoading, setGpsLoading] = useState(false);
+  const [gpsError, setGpsError] = useState<string | null>(null);
 
   const [eco, setEco] = useState<EcoCrop | null>(null);
-  const [errorEco, setErrorEco] = useState<string | null>(null);
-  const [cultivoNombre, setCultivoNombre] = useState("Maíz");
-  const [mesSiembra, setMesSiembra] = useState<number>(() => new Date().getMonth() + 1);
+  const [ecoError, setEcoError] = useState<string | null>(null);
 
-  const anioFin = new Date().getFullYear();
-  const anioInicio = anioFin - ANIOS_ATRAS;
-  const clave = `${ubicacion.lat},${ubicacion.lon},${anioInicio},${anioFin},${intento}`;
-  const claveExtra = `${ubicacion.lat},${ubicacion.lon},${intento}`;
+  // Base crop + base month (what the user picks), plus the rotation chain built on top of it.
+  const [baseCrop, setBaseCrop] = useState("Maíz");
+  const [baseMonth, setBaseMonth] = useState<number>(() => new Date().getMonth() + 1);
+  const [chain, setChain] = useState<RotationStep[]>([]);
 
-  // Temperatura media mensual: NASA POWER
+  // The active step is the last one of the chain, or the base if the chain is empty.
+  const lastStep = chain[chain.length - 1];
+  const cropName = lastStep ? lastStep.crop : baseCrop;
+  const sowMonth = lastStep ? lastStep.month : baseMonth;
+
+  const yearEnd = new Date().getFullYear();
+  const yearStart = yearEnd - YEARS_BACK;
+  const key = `${place.lat},${place.lon},${yearStart},${yearEnd},${attempt}`;
+  const extraKey = `${place.lat},${place.lon},${attempt}`;
+
+  // Monthly mean temperature: NASA POWER
   useEffect(() => {
-    const controlador = new AbortController();
-    pedirDatosPower(ubicacion, anioInicio, anioFin, controlador.signal)
-      .then((datos) => setResultado({ clave, datos, error: null }))
+    const controller = new AbortController();
+    fetchPowerData(place, yearStart, yearEnd, controller.signal)
+      .then((data) => setPowerResult({ key, data, error: null }))
       .catch((e: unknown) => {
         if (e instanceof DOMException && e.name === "AbortError") return;
-        setResultado({
-          clave,
-          datos: null,
-          error: e instanceof Error ? e.message : "Error desconocido",
+        setPowerResult({
+          key,
+          data: null,
+          error: e instanceof Error ? e.message : "Unknown error",
         });
       });
-    return () => controlador.abort();
-  }, [clave, ubicacion, anioInicio, anioFin]);
+    return () => controller.abort();
+  }, [key, place, yearStart, yearEnd]);
 
-  // Lluvia, ET0 y mínima diaria: ERA5 vía Open-Meteo
+  // Rainfall, ET0 and daily minimum: ERA5 via Open-Meteo
   useEffect(() => {
-    const controlador = new AbortController();
-    pedirDatosEra(ubicacion, anioInicio, anioFin, controlador.signal)
-      .then((datos) => setEraRes({ clave, valor: datos, error: null }))
+    const controller = new AbortController();
+    fetchEraData(place, yearStart, yearEnd, controller.signal)
+      .then((data) => setEraRes({ key, value: data, error: null }))
       .catch((e: unknown) => {
         if (e instanceof DOMException && e.name === "AbortError") return;
         setEraRes({
-          clave,
-          valor: null,
-          error: e instanceof Error ? e.message : "Error desconocido al pedir ERA5",
+          key,
+          value: null,
+          error: e instanceof Error ? e.message : "Unknown error while requesting ERA5",
         });
       });
-    return () => controlador.abort();
-  }, [clave, ubicacion, anioInicio, anioFin]);
+    return () => controller.abort();
+  }, [key, place, yearStart, yearEnd]);
 
-  // pH del suelo: SoilGrids
+  // Soil pH: SoilGrids
   useEffect(() => {
-    const controlador = new AbortController();
-    pedirPh(ubicacion, controlador.signal)
-      .then((v) => setPhRes({ clave: claveExtra, valor: v, error: null }))
+    const controller = new AbortController();
+    fetchPh(place, controller.signal)
+      .then((v) => setPhRes({ key: extraKey, value: v, error: null }))
       .catch((e: unknown) => {
         if (e instanceof DOMException && e.name === "AbortError") return;
         setPhRes({
-          clave: claveExtra,
-          valor: null,
-          error: e instanceof Error ? e.message : "Error desconocido al pedir el pH",
+          key: extraKey,
+          value: null,
+          error: e instanceof Error ? e.message : "Unknown error while requesting pH",
         });
       });
-    return () => controlador.abort();
-  }, [claveExtra, ubicacion]);
+    return () => controller.abort();
+  }, [extraKey, place]);
 
   useEffect(() => {
     fetch("/datos/ecocrop.json")
       .then((r) => {
-        if (!r.ok) throw new Error(`No se pudo leer ecocrop.json (error ${r.status})`);
+        if (!r.ok) throw new Error(`Could not read ecocrop.json (error ${r.status})`);
         return r.json();
       })
-      .then((j: EcoCrop) => setEco(j))
+      .then((j: EcoCrop) => {
+        setEco(j);
+        // if the default crop does not exist in the file, fall back to the first one
+        setBaseCrop((prev) => (j.cultivos[prev] ? prev : Object.keys(j.cultivos)[0] ?? prev));
+      })
       .catch((e: unknown) =>
-        setErrorEco(e instanceof Error ? e.message : "Error desconocido al leer ecocrop.json")
+        setEcoError(e instanceof Error ? e.message : "Unknown error while reading ecocrop.json")
       );
   }, []);
 
-  function usarMiUbicacion() {
+  function useMyLocation() {
     if (!("geolocation" in navigator)) {
-      setErrorGps("Tu navegador no permite obtener la ubicación.");
+      setGpsError("Your browser cannot provide your location.");
       return;
     }
-    setBuscandoGps(true);
-    setErrorGps(null);
+    setGpsLoading(true);
+    setGpsError(null);
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        setBuscandoGps(false);
-        setUbicacion({
-          nombre: "Mi ubicación",
-          lat: redondear(pos.coords.latitude),
-          lon: redondear(pos.coords.longitude),
+        setGpsLoading(false);
+        setPlace({
+          name: "My location",
+          lat: round2(pos.coords.latitude),
+          lon: round2(pos.coords.longitude),
         });
       },
       (err) => {
-        setBuscandoGps(false);
-        setErrorGps(
+        setGpsLoading(false);
+        setGpsError(
           err.code === err.PERMISSION_DENIED
-            ? "No diste permiso para usar la ubicación. Podés buscar el lugar o tocar el mapa."
-            : "No se pudo obtener la ubicación. Probá buscando el lugar o tocando el mapa."
+            ? "Location permission was denied. You can search for the place or tap the map."
+            : "Could not get your location. Try searching for the place or tapping the map."
         );
       },
       { timeout: 15000 }
     );
   }
 
-  const anios = useMemo(
-    () => Array.from({ length: anioFin - anioInicio + 1 }, (_, i) => anioInicio + i),
-    [anioInicio, anioFin]
+  const years = useMemo(
+    () => Array.from({ length: yearEnd - yearStart + 1 }, (_, i) => yearStart + i),
+    [yearStart, yearEnd]
   );
 
-  const actual = resultado && resultado.clave === clave ? resultado : null;
-  const datosPower = actual?.datos ?? null;
-  const eraActual = eraRes && eraRes.clave === clave ? eraRes : null;
-  const datosEra = eraActual?.valor ?? null;
-  const phActual = phRes && phRes.clave === claveExtra ? phRes : null;
+  const powerCur = powerResult && powerResult.key === key ? powerResult : null;
+  const powerData = powerCur?.data ?? null;
+  const eraCur = eraRes && eraRes.key === key ? eraRes : null;
+  const eraData = eraCur?.value ?? null;
+  const phCur = phRes && phRes.key === extraKey ? phRes : null;
+  const phValue = phCur?.value ?? null;
 
-  const cultivo = eco?.cultivos[cultivoNombre] ?? null;
-  const dias = cultivo ? diasDelCiclo(cultivo) : null;
-  const nMeses = dias ? Math.max(1, Math.round(dias / 30)) : 1;
-  const nombreC = cultivoNombre.toLowerCase();
+  const crop = eco?.cultivos[cropName] ?? null;
+  const days = crop ? cycleDays(crop) : null;
+  const nMonths = days ? Math.max(1, Math.round(days / 30)) : 1;
+  const cropLower = cropName.toLowerCase();
 
-  // pH: no depende del mes, así que se evalúa una sola vez
-  const rangoPh = cultivo && tieneRango(cultivo.ph) ? cultivo.ph : null;
-  const phValor = phActual?.valor ?? null;
-  const vPh: Veredicto = rangoPh && phValor ? VER_DE_CLASE[clasificarRango(phValor.media, rangoPh)] : "sin";
+  // pH: does not depend on the month, so it is evaluated only once
+  const phRange = crop && hasRange(crop.ph) ? crop.ph : null;
+  const vPh: Verdict = phRange && phValue ? VERDICT_OF_CLASS[classifyRange(phValue.mean, phRange)] : "none";
 
-  // Lluvia: el rango de EcoCrop es para el ciclo, así que depende del mes de siembra
-  const rangoLluvia = cultivo && tieneRango(cultivo.lluviaAnual) ? cultivo.lluviaAnual : null;
+  // Rainfall: the EcoCrop range is for the cycle, so it depends on the sowing month
+  const rainRange = crop && hasRange(crop.lluviaAnual) ? crop.lluviaAnual : null;
 
-  // Un análisis por cada uno de los 12 meses posibles de siembra:
-  // temperatura (POWER) y lluvia + ET0 (ERA5), cada uno con su propia fuente.
-  const porMesSiembra = useMemo(() => {
-    if (!cultivo || !dias || (!datosPower && !datosEra)) return [];
+  // One analysis for each of the 12 possible sowing months:
+  // temperature (POWER) and rainfall + ET0 (ERA5), each from its own source.
+  const byStartMonth = useMemo(() => {
+    if (!crop || !days || (!powerData && !eraData)) return [];
     return Array.from({ length: 12 }, (_, i) => {
-      const mes = i + 1;
-      const a = datosPower
-        ? analizar(curvasMensuales(datosPower, mes, nMeses, anios), cultivo.temperatura, nMeses)
+      const month = i + 1;
+      const a = powerData
+        ? analyze(monthlyCurves(powerData, month, nMonths, years), crop.temperatura, nMonths)
         : null;
       const rain =
-        datosEra && rangoLluvia
-          ? resumirLluvia(ciclosEra(datosEra, "lluvia", mes, nMeses, anios), rangoLluvia, nMeses)
+        eraData && rainRange
+          ? summarizeRain(eraCycles(eraData, "rain", month, nMonths, years), rainRange, nMonths)
           : null;
-      const et0 = datosEra ? et0DelCiclo(ciclosEra(datosEra, "et0", mes, nMeses, anios)) : null;
+      const et0 = eraData ? cycleEt0(eraCycles(eraData, "et0", month, nMonths, years)) : null;
       return {
-        mes,
+        month,
         a,
         rain,
         et0,
-        vT: veredictoTemperatura(a, cultivo.temperatura),
-        vL: rangoLluvia ? veredictoLluvia(rain, rangoLluvia) : ("sin" as Veredicto),
+        vT: temperatureVerdict(a, crop.temperatura),
+        vR: rainRange ? rainVerdict(rain, rainRange) : ("none" as Verdict),
       };
     });
-  }, [datosPower, datosEra, cultivo, dias, nMeses, anios, rangoLluvia]);
+  }, [powerData, eraData, crop, days, nMonths, years, rainRange]);
 
-  const sel = porMesSiembra[mesSiembra - 1] ?? null;
-  const vTemp: Veredicto = sel?.vT ?? "sin";
-  const resLluvia = sel?.rain ?? null;
-  const et0Ciclo = sel?.et0 ?? null;
-  const vLluvia: Veredicto = sel?.vL ?? "sin";
-  const global = combinar(vTemp, vPh, vLluvia);
-  const nombresCiclo = Array.from({ length: nMeses }, (_, i) => MESES[(mesSiembra - 1 + i) % 12]);
-  const mesFin = nombresCiclo[nombresCiclo.length - 1];
-  const mejores = porMesSiembra
-    .filter((m) => combinar(m.vT, vPh, m.vL) === "si")
-    .map((m) => MESES[m.mes - 1]);
+  const sel = byStartMonth[sowMonth - 1] ?? null;
+  const vTemp: Verdict = sel?.vT ?? "none";
+  const rainSummary = sel?.rain ?? null;
+  const et0Cycle = sel?.et0 ?? null;
+  const vRain: Verdict = sel?.vR ?? "none";
+  const overall = combine(vTemp, vPh, vRain);
+  const cycleNames = Array.from({ length: nMonths }, (_, i) => MONTHS[(sowMonth - 1 + i) % 12]);
+  const endMonthName = cycleNames[cycleNames.length - 1];
+  const bestMonths = byStartMonth
+    .filter((m) => combine(m.vT, vPh, m.vR) === "yes")
+    .map((m) => MONTHS[m.month - 1]);
 
-  // Temperatura letal (opcional): mínima diaria más baja de cada ciclo (ERA5)
-  const tLetal = cultivo?.tLetal ?? null;
-  const heladas = useMemo(() => {
-    if (!datosEra || tLetal === null || !cultivo) return null;
-    const minimas = minimasDelCiclo(datosEra, mesSiembra, nMeses, anios);
-    if (minimas.length === 0) return null;
-    return { n: minimas.length, bajo: minimas.filter((m) => m < tLetal).length };
-  }, [datosEra, tLetal, cultivo, mesSiembra, nMeses, anios]);
+  // Month in which a following crop would be sown (right after this cycle ends)
+  const nextMonth = ((sowMonth - 1 + nMonths) % 12) + 1;
 
-  // Cobertura de la ET0 por la lluvia (solo informativa)
-  const cobertura = resLluvia && et0Ciclo && et0Ciclo > 0 ? resLluvia.mediana / et0Ciclo : null;
-
-  function explicacionTemperatura(): string {
-    if (!sel || !sel.a || !cultivo) return "";
-    const a = sel.a;
-    if (sel.vT === "sin") {
-      return `Solo hay ${a.n} años con datos de temperatura completos para este ciclo; hacen falta al menos ${MIN_ANIOS} para opinar.`;
+  // Crop rotation: every other crop, evaluated for the month that follows the current cycle.
+  const rotationOptions = useMemo(() => {
+    if (!eco || (!powerData && !eraData)) return [];
+    const list: { name: string; verdict: Verdict; nMonths: number }[] = [];
+    for (const [name, c] of Object.entries(eco.cultivos)) {
+      if (name === cropName) continue;
+      const r = evaluateCrop(c, nextMonth, powerData, eraData, phValue, years);
+      if (r && (r.verdict === "yes" || r.verdict === "caution")) {
+        list.push({ name, verdict: r.verdict, nMonths: r.nMonths });
+      }
     }
-    if (!a.critico) return "En ningún año la temperatura salió de lo que tolera el cultivo durante el ciclo.";
-    const m = a.porMes[a.critico.mes];
-    const r = cultivo.temperatura;
-    const frio = m.bajos >= m.altos;
-    const limite = frio ? r.min : r.max;
-    return `El mes más delicado es ${nombresCiclo[a.critico.mes]}: en ${a.critico.fallos} de ${a.n} años ${
-      frio ? "hizo más frío del mínimo" : "hizo más calor del máximo"
-    } que tolera el ${nombreC} (${limite !== null ? formatear(limite) : "?"} °C).`;
+    list.sort((a, b) => GRAVITY[a.verdict] - GRAVITY[b.verdict]);
+    return list;
+  }, [eco, cropName, nextMonth, powerData, eraData, phValue, years]);
+
+  const climateLoading = !powerData && !powerCur?.error && !eraData && !eraCur?.error;
+  const climateFailed = !powerData && !eraData && (!!powerCur?.error || !!eraCur?.error);
+  const rotationSteps: RotationStep[] = [{ crop: baseCrop, month: baseMonth }, ...chain];
+
+  function pickCrop(name: string) {
+    setBaseCrop(name);
+    setChain([]);
+  }
+  function pickMonth(m: number) {
+    setBaseMonth(m);
+    setChain([]);
+  }
+  function addRotation(name: string) {
+    setChain((prev) => [...prev, { crop: name, month: nextMonth }]);
   }
 
-  function explicacionLluvia(): string {
-    if (!resLluvia || !rangoLluvia) return "";
-    const r = rangoLluvia;
-    const med = resLluvia.mediana;
-    const medTxt = formatear(med);
-    const n = (v: number | null) => (v !== null ? formatear(v) : "?");
-    if (vLluvia === "sin") {
-      return `Solo hay ${resLluvia.n} años con lluvia completa para este ciclo; hacen falta al menos ${MIN_ANIOS} para opinar.`;
+  // Lethal temperature (optional): lowest daily minimum of each cycle (ERA5)
+  const tLethal = crop?.tLetal ?? null;
+  const frost = useMemo(() => {
+    if (!eraData || tLethal === null || !crop) return null;
+    const minimums = cycleMinimums(eraData, sowMonth, nMonths, years);
+    if (minimums.length === 0) return null;
+    return { n: minimums.length, below: minimums.filter((m) => m < tLethal).length };
+  }, [eraData, tLethal, crop, sowMonth, nMonths, years]);
+
+  // Rainfall and ET0 per cycle month (typical year), for the water balance chart
+  const monthlyCycle = useMemo(() => {
+    if (!eraData) return null;
+    const rain = eraCycles(eraData, "rain", sowMonth, nMonths, years);
+    if (rain.length < MIN_YEARS) return null;
+    const et = eraCycles(eraData, "et0", sowMonth, nMonths, years);
+    const med = (c: number[][]) => Array.from({ length: nMonths }, (_, i) => median(c.map((r) => r[i])));
+    return { rain: med(rain), et0: et.length >= MIN_YEARS ? med(et) : null };
+  }, [eraData, sowMonth, nMonths, years]);
+
+  // How much of the ET0 is covered by rainfall (informational only)
+  const coverage = rainSummary && et0Cycle && et0Cycle > 0 ? rainSummary.median / et0Cycle : null;
+  const coverageText =
+    coverage === null
+      ? null
+      : coverage >= 1
+      ? `${fmt(coverage, 1)}× the ET0`
+      : `${fmt(coverage * 100)} % of the ET0`;
+  const deficitMonths =
+    monthlyCycle?.et0 ? monthlyCycle.rain.filter((v, i) => v < monthlyCycle.et0![i]).length : null;
+
+  function temperatureExplanation(): string {
+    if (!sel || !sel.a || !crop) return "";
+    const a = sel.a;
+    if (sel.vT === "none") {
+      return `Only ${a.n} years have complete temperature data for this cycle; at least ${MIN_YEARS} are needed to give an opinion.`;
     }
-    const bajaIdeal = r.optMin !== null && med < r.optMin;
-    const altaIdeal = r.optMax !== null && med > r.optMax;
-    if (vLluvia === "no") {
+    if (!a.critical) return "In no year did the temperature leave the range the crop tolerates during the cycle.";
+    const m = a.byMonth[a.critical.month];
+    const r = crop.temperatura;
+    const cold = m.low >= m.high;
+    const limit = cold ? r.min : r.max;
+    return `The most delicate month is ${cycleNames[a.critical.month]}: in ${a.critical.fails} of ${a.n} years it was ${
+      cold ? "colder than the minimum" : "hotter than the maximum"
+    } that ${cropLower} tolerates (${limit !== null ? fmt(limit) : "?"} °C).`;
+  }
+
+  function rainExplanation(): string {
+    if (!rainSummary || !rainRange) return "";
+    const r = rainRange;
+    const med = rainSummary.median;
+    const medText = fmt(med);
+    const n = (v: number | null) => (v !== null ? fmt(v) : "?");
+    if (vRain === "none") {
+      return `Only ${rainSummary.n} years have complete rainfall data for this cycle; at least ${MIN_YEARS} are needed to give an opinion.`;
+    }
+    const belowIdeal = r.optMin !== null && med < r.optMin;
+    const aboveIdeal = r.optMax !== null && med > r.optMax;
+    if (vRain === "no") {
       if (r.min !== null && med < r.min) {
-        return `Sembrando en ${MESES[mesSiembra - 1].toLowerCase()} llueven unos ${medTxt} mm durante el ciclo, menos de lo que tolera el ${nombreC} (mínimo ${n(r.min)} mm). Necesitaría riego.`;
+        return `Sowing in ${MONTHS[sowMonth - 1]} brings about ${medText} mm of rain during the cycle, less than ${cropLower} tolerates (minimum ${n(r.min)} mm). It would need irrigation.`;
       }
       if (r.max !== null && med > r.max) {
-        return `Sembrando en ${MESES[mesSiembra - 1].toLowerCase()} llueven unos ${medTxt} mm durante el ciclo, más de lo que tolera el ${nombreC} (máximo ${n(r.max)} mm).`;
+        return `Sowing in ${MONTHS[sowMonth - 1]} brings about ${medText} mm of rain during the cycle, more than ${cropLower} tolerates (maximum ${n(r.max)} mm).`;
       }
-      return `En ${resLluvia.n - resLluvia.ok} de ${resLluvia.n} años la lluvia del ciclo quedó fuera de lo que tolera el ${nombreC} (${n(r.min)}–${n(r.max)} mm).`;
+      return `In ${rainSummary.n - rainSummary.ok} of ${rainSummary.n} years the cycle rainfall was outside what ${cropLower} tolerates (${n(r.min)}–${n(r.max)} mm).`;
     }
-    if (bajaIdeal) {
-      return `Durante el ciclo llueven unos ${medTxt} mm: el ${nombreC} lo tolera, pero queda por debajo del ideal (${n(r.optMin)}–${n(r.optMax)} mm). Un riego de apoyo ayudaría.`;
+    if (belowIdeal) {
+      return `About ${medText} mm of rain falls during the cycle: ${cropLower} tolerates it, but it is below the ideal (${n(r.optMin)}–${n(r.optMax)} mm). Supplemental irrigation would help.`;
     }
-    if (altaIdeal) {
-      return `Durante el ciclo llueven unos ${medTxt} mm: el ${nombreC} lo tolera, pero queda por encima del ideal (${n(r.optMin)}–${n(r.optMax)} mm).`;
+    if (aboveIdeal) {
+      return `About ${medText} mm of rain falls during the cycle: ${cropLower} tolerates it, but it is above the ideal (${n(r.optMin)}–${n(r.optMax)} mm).`;
     }
-    return `En ${resLluvia.n - resLluvia.ok} de ${resLluvia.n} años la lluvia del ciclo quedó fuera de lo que tolera el ${nombreC} (${n(r.min)}–${n(r.max)} mm).`;
+    return `In ${rainSummary.n - rainSummary.ok} of ${rainSummary.n} years the cycle rainfall was outside what ${cropLower} tolerates (${n(r.min)}–${n(r.max)} mm).`;
   }
 
-  function explicacionPh(): string {
-    if (!phValor || !rangoPh) return "";
+  function phExplanation(): string {
+    if (!phValue || !phRange) return "";
     return vPh === "no"
-      ? `El pH del suelo en este punto (${formatear(phValor.media, 1)}) está fuera de lo que tolera el ${nombreC} (${rangoPh.min ?? "?"}–${rangoPh.max ?? "?"}).`
-      : `El pH del suelo en este punto (${formatear(phValor.media, 1)}) tolera, pero no es el ideal del ${nombreC} (${rangoPh.optMin ?? "?"}–${rangoPh.optMax ?? "?"}).`;
+      ? `Soil pH at this point (${fmt(phValue.mean, 1)}) is outside what ${cropLower} tolerates (${phRange.min ?? "?"}–${phRange.max ?? "?"}).`
+      : `Soil pH at this point (${fmt(phValue.mean, 1)}) is tolerable, but not ideal for ${cropLower} (${phRange.optMin ?? "?"}–${phRange.optMax ?? "?"}).`;
   }
 
-  function explicacion(): string {
-    if (!cultivo) return "";
-    if (global === "si") {
-      const partes = ["la temperatura"];
-      if (vLluvia !== "sin") partes.push("la lluvia del ciclo");
-      if (vPh !== "sin") partes.push("el pH del suelo");
-      const lista =
-        partes.length === 1 ? partes[0] : `${partes.slice(0, -1).join(", ")} y ${partes[partes.length - 1]}`;
-      const base = `${lista.charAt(0).toUpperCase()}${lista.slice(1)} ${
-        partes.length === 1 ? "está" : "están"
-      } dentro de lo que tolera el cultivo.`;
-      return vPh === "sin" ? `${base} (El pH del suelo todavía no se pudo evaluar.)` : base;
+  function explanation(): string {
+    if (!crop) return "";
+    if (overall === "yes") {
+      const parts = ["temperature"];
+      if (vRain !== "none") parts.push("cycle rainfall");
+      if (vPh !== "none") parts.push("soil pH");
+      const list = joinList(parts);
+      const base = `${list.charAt(0).toUpperCase()}${list.slice(1)} ${
+        parts.length === 1 ? "is" : "are"
+      } within what the crop tolerates.`;
+      return vPh === "none" ? `${base} (Soil pH could not be evaluated yet.)` : base;
     }
-    const gT = GRAV[vTemp];
-    const gP = GRAV[vPh];
-    const gL = GRAV[vLluvia];
-    const peorG = Math.max(gT, gP, gL);
-    if (gT === peorG) return explicacionTemperatura();
-    if (gP === peorG) return explicacionPh();
-    return explicacionLluvia();
+    const gT = GRAVITY[vTemp];
+    const gP = GRAVITY[vPh];
+    const gR = GRAVITY[vRain];
+    const worstG = Math.max(gT, gP, gR);
+    if (gT === worstG) return temperatureExplanation();
+    if (gP === worstG) return phExplanation();
+    return rainExplanation();
   }
 
-  const TITULO: Record<Veredicto, string> = {
-    si: `Sí conviene sembrar ${nombreC} en ${MESES[mesSiembra - 1].toLowerCase()}`,
-    cuidado: `Se puede sembrar ${nombreC} en ${MESES[mesSiembra - 1].toLowerCase()}, con cuidado`,
-    no: `No conviene sembrar ${nombreC} en ${MESES[mesSiembra - 1].toLowerCase()}`,
-    sin: "Todavía no se puede opinar",
+  const monthLower = MONTHS[sowMonth - 1].toLowerCase();
+  const TITLE: Record<Verdict, string> = {
+    yes: `Planting ${cropLower} in ${monthLower} is a good idea`,
+    caution: `You can plant ${cropLower} in ${monthLower}, with caution`,
+    no: `Planting ${cropLower} in ${monthLower} is not recommended`,
+    none: "Not enough data to give an opinion yet",
   };
-
-  const textoTemp =
-    !datosPower ? "consultando…" : !sel?.a ? "sin datos" : `${sel.a.cicloOk} de ${sel.a.n} años bien`;
-  const textoPh = !rangoPh
-    ? "sin rango para este cultivo"
-    : phActual?.error
-    ? "sin dato"
-    : !phValor
-    ? "consultando…"
-    : `${formatear(phValor.media, 1)} · ${
-        vPh === "si" ? "ideal" : vPh === "cuidado" ? "tolerable" : "fuera de rango"
-      }`;
-  const textoLluvia = !rangoLluvia
-    ? "sin rango para este cultivo"
-    : !datosEra
-    ? eraActual?.error
-      ? "sin dato"
-      : "consultando…"
-    : !resLluvia
-    ? "sin datos"
-    : `${formatear(resLluvia.mediana)} mm en el ciclo · ${
-        vLluvia === "si"
-          ? "ideal"
-          : vLluvia === "cuidado"
-          ? "tolerable"
-          : vLluvia === "no"
-          ? "fuera de rango"
-          : "pocos años"
-      }`;
 
   return (
     <main className="cm">
-      <div className="cm-wrap">
-        <header className="cm-cab">
-          <Link href="/">← Inicio</Link>
-          <span className="cm-sutil">03 / 05</span>
-        </header>
-        <span className="cm-kicker">Analizar mis cultivos</span>
-        <h1>¿Conviene sembrar?</h1>
-        <p className="cm-sub">
-          Elegí cultivo, mes y lugar. Mirá cómo le habría ido en los últimos {ANIOS_ATRAS} años.
-        </p>
+      {/* ---------- Fixed top bar: logo + home ---------- */}
+      <div className="cm-topbar">
+        <Link href="/" className="cm-logo" aria-label="Farmer Query home">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/farmer-query-logo.svg" alt="Farmer Query" />
+        </Link>
+        <Link href="/" className="cm-home">
+          ← Home
+        </Link>
+      </div>
 
-        {/* ---------- Fila principal: qué y cuándo · dónde · conviene ---------- */}
-        <div className="cm-fila">
-          <div className="cm-card">
-            <label className="cm-etiqueta" htmlFor="cm-cultivo">
-              Qué sembrar
-            </label>
-            <select
-              id="cm-cultivo"
-              value={cultivoNombre}
-              onChange={(e) => setCultivoNombre(e.target.value)}
-              disabled={!eco}
-            >
-              {eco ? (
-                Object.keys(eco.cultivos).map((nombre) => (
-                  <option key={nombre} value={nombre}>
-                    {nombre}
-                  </option>
-                ))
-              ) : (
-                <option>Cargando…</option>
-              )}
-            </select>
-
-            <span className="cm-etiqueta" style={{ marginTop: 14 }}>
-              Cuándo sembrar
+      {/* ---------- Header: verdict | location ---------- */}
+      <header className="cm-head">
+        <div className="cm-head-left">
+          <div className="cm-head-title">
+            <h1>Should I plant?</h1>
+            <span className="cm-head-sub">
+              Analyzing yearly patterns of the last {YEARS_BACK} years using NASA POWER, ERA5 (Open-Meteo),
+              SoilGrids and FAO EcoCrop criteria
             </span>
-            <div className="cm-meses">
-              {MESES.map((nombre, i) => {
-                const mes = i + 1;
-                const p = porMesSiembra[i];
-                const v = p ? combinar(p.vT, vPh, p.vL) : "sin";
-                return (
-                  <button
-                    key={nombre}
-                    type="button"
-                    className="cm-mes"
-                    aria-pressed={mes === mesSiembra}
-                    onClick={() => setMesSiembra(mes)}
-                    title={`${nombre}: ${
-                      v === "si" ? "sí conviene" : v === "cuidado" ? "con cuidado" : v === "no" ? "no conviene" : "sin datos suficientes"
-                    }`}
-                  >
-                    <span className="cm-punto" style={{ background: COLOR_VEREDICTO[v] }} />
-                    {nombre.slice(0, 3)}
-                  </button>
-                );
-              })}
-            </div>
-            <p className="cm-nota">El color de cada mes dice cómo le habría ido al cultivo si se sembraba entonces.</p>
           </div>
+          {ecoError && <p className="cm-error">{ecoError}</p>}
 
-          <div className="cm-card" style={{ display: "flex", flexDirection: "column" }}>
-            <div className="cm-ubi-cab">
-              <span className="cm-etiqueta">Dónde sembrar</span>
-              <span>
-                <span className="cm-ubi-nombre">{ubicacion.nombre}</span>{" "}
-                <span className="cm-ubi-coord">
-                  ({ubicacion.lat}°, {ubicacion.lon}°)
-                </span>
-              </span>
-            </div>
-            <BuscadorLugar onElegir={setUbicacion} />
-            <Mapa ubicacion={ubicacion} onElegir={setUbicacion} />
-            <div className="cm-mapa-pie">
-              <p>Tocá el mapa para marcar tu terreno.</p>
-              <button type="button" className="cm-boton sec" onClick={usarMiUbicacion} disabled={buscandoGps}>
-                {buscandoGps ? "Obteniendo…" : "Usar mi ubicación"}
-              </button>
-            </div>
-            {errorGps && <p className="cm-error" style={{ marginTop: 6 }}>{errorGps}</p>}
-          </div>
-
-          <div className={`cm-ver ${global}`} role="status">
-            {!datosPower && !actual?.error ? (
+          <section className={`cm-verdict ${overall}`} role="status">
+            {!powerData && !powerCur?.error ? (
               <>
-                <h2>Calculando…</h2>
-                <p className="cm-fino">Consultando el clima de los últimos años.</p>
+                <h2>Calculating…</h2>
+                <p>Fetching the climate of recent years.</p>
               </>
-            ) : actual?.error ? (
+            ) : powerCur?.error ? (
               <>
-                <h2>No se pudieron cargar los datos</h2>
-                <p className="cm-error">{actual.error}</p>
+                <h2>Could not load the data</h2>
+                <p className="cm-error">{powerCur.error}</p>
                 <div>
-                  <button type="button" className="cm-boton" onClick={() => setIntento((n) => n + 1)}>
-                    Reintentar
+                  <button type="button" className="cm-btn" onClick={() => setAttempt((n) => n + 1)}>
+                    Retry
                   </button>
                 </div>
               </>
             ) : (
               <>
-                <h2>{TITULO[global]}</h2>
-                <p>{explicacion()}</p>
-
-                <ul className="cm-factores">
-                  <li className="cm-factor">
-                    <span className="cm-punto" style={{ background: COLOR_VEREDICTO[vTemp] }} />
-                    <span>
-                      <b>Temperatura</b> · {textoTemp}
-                    </span>
-                  </li>
-                  <li className="cm-factor">
-                    <span className="cm-punto" style={{ background: COLOR_VEREDICTO[vLluvia] }} />
-                    <span>
-                      <b>Lluvia del ciclo</b> · {textoLluvia}
-                    </span>
-                  </li>
-                  <li className="cm-factor">
-                    <span className="cm-punto" style={{ background: COLOR_VEREDICTO[vPh] }} />
-                    <span>
-                      <b>pH del suelo</b> · {textoPh}
-                    </span>
-                  </li>
-                </ul>
-
-                {global !== "si" && mejores.length > 0 && (
-                  <p>
-                    <strong>Meses que mejor le irían:</strong> {mejores.join(", ")}.
+                <h2>{TITLE[overall]}</h2>
+                <p>{explanation()}</p>
+                {overall !== "yes" && bestMonths.length > 0 && (
+                  <p className="cm-best">
+                    <strong>Best months for it:</strong> {bestMonths.join(", ")}.
                   </p>
                 )}
-                {eraActual?.error && (
-                  <p className="cm-error">No se pudo cargar la lluvia (ERA5): {eraActual.error}</p>
-                )}
-                {resLluvia && resLluvia.secos > 0 && (
-                  <p className="cm-fino">
-                    Aviso: en el año típico, {resLluvia.secos} {resLluvia.secos === 1 ? "mes" : "meses"} del ciclo
-                    tienen menos de {MES_SECO_MM} mm de lluvia.
-                  </p>
-                )}
-                {cobertura !== null && cobertura < RATIO_ET0_AVISO && (
-                  <p className="cm-fino">
-                    Aviso: la lluvia del ciclo cubre cerca del {formatear(cobertura * 100)} % de la evaporación
-                    potencial (ET0). Puede hacer falta riego.
-                  </p>
-                )}
-                {heladas && heladas.bajo > 0 && tLetal !== null && (
-                  <p className="cm-fino">
-                    Aviso: en {heladas.bajo} de {heladas.n} años la temperatura mínima diaria bajó de{" "}
-                    {formatear(tLetal)} °C (temperatura letal) durante el ciclo.
-                  </p>
-                )}
-                <p className="cm-fino">
-                  Ciclo estimado: {nMeses} {nMeses === 1 ? "mes" : "meses"} ({MESES[mesSiembra - 1]} a {mesFin}).
-                </p>
+                {eraCur?.error && <p className="cm-error">Could not load rainfall (ERA5): {eraCur.error}</p>}
               </>
             )}
-          </div>
+          </section>
         </div>
 
-        {errorEco && <p className="cm-error" style={{ marginTop: 12 }}>{errorEco}</p>}
-        {!eco && !errorEco && <p className="cm-cargando">Cargando rangos de cultivos…</p>}
+        <div className="cm-head-right">
+          <div className="cm-loc">
+            <h2 className="cm-label">Where to plant</h2>
+            <p className="cm-loc-name">{place.name}</p>
+            <p className="cm-loc-coords">
+              {place.lat}°, {place.lon}°
+            </p>
+            <div className="cm-search">
+              <PlaceSearch onPick={setPlace} />
+              <button type="button" className="cm-btn" onClick={useMyLocation} disabled={gpsLoading}>
+                {gpsLoading ? "Locating…" : "My location"}
+              </button>
+            </div>
+            {gpsError && <p className="cm-error">{gpsError}</p>}
+            <p className="cm-note">Use the wheel to zoom the globe; up close it becomes a sketch map. Tap to mark your field.</p>
+            <p className="cm-credit">Map: © OpenStreetMap · OpenFreeMap · NASA GIBS · MapLibre</p>
+          </div>
+          <GlobeMap place={place} onPick={setPlace} />
+        </div>
+      </header>
 
-        {/* ---------- Gráficas: pH y lluvia a la izquierda, temperatura a la derecha ---------- */}
-        {cultivo && (
-          <section className="cm-card cm-graf">
-            <div className="cm-graf-cuerpo">
-              {/* Izquierda: dos medidores verticales */}
-              <div>
-                <div className="cm-lugar">
-                  <div className="cm-vert">
-                    <h3 className="cm-h3">pH del suelo</h3>
-                    {rangoPh && (
-                      <p className="cm-rango">
-                        Ideal {rangoPh.optMin ?? "?"}–{rangoPh.optMax ?? "?"} · Tolera {rangoPh.min ?? "?"}–{rangoPh.max ?? "?"}
-                      </p>
-                    )}
-                    {!rangoPh && (
-                      <p className="cm-vacio">EcoCrop no trae rango de pH para este cultivo.</p>
-                    )}
-                    {rangoPh && !phActual && <p className="cm-vacio">Consultando SoilGrids…</p>}
-                    {rangoPh && phActual?.error && (
-                      <div>
-                        <p className="cm-error">{phActual.error}</p>
-                        <p style={{ marginTop: 8 }}>
-                          <button type="button" className="cm-boton sec" onClick={() => setIntento((n) => n + 1)}>
-                            Reintentar
-                          </button>
-                        </p>
-                      </div>
-                    )}
-                    {rangoPh && phValor && (
-                      <>
-                        <MedidorVertical
-                          valor={phValor.media}
-                          bajo={phValor.p5}
-                          alto={phValor.p95}
-                          rango={rangoPh}
-                          dec={1}
-                          aria={`pH del suelo ${phValor.media} frente al rango que tolera el cultivo`}
-                          tooltipValor={`pH estimado: ${formatear(phValor.media, 1)}`}
-                          tooltipRango={`Incertidumbre del modelo: ${formatear(phValor.p5, 1)} a ${formatear(phValor.p95, 1)}`}
-                        />
-                        <p className="cm-dato-grande" style={{ color: COLOR_VEREDICTO[vPh] }}>
-                          pH {formatear(phValor.media, 1)}
-                        </p>
-                        <p className="cm-chico">
-                          El modelo estima entre {formatear(phValor.p5, 1)} y {formatear(phValor.p95, 1)} (0–30 cm).
-                          Es una estimación satelital: un análisis de suelo es más confiable.
-                        </p>
-                      </>
+      <div className="cm-body">
+        {/* ---------- Left: crops as a fixed vertical list, no scroll ---------- */}
+        <nav className="cm-side" aria-label="Crops">
+          <h2 className="cm-label">What to plant</h2>
+          {!eco && !ecoError && <span className="cm-loading">Loading crops…</span>}
+          {eco && (
+            <div className="cm-crop-list" role="radiogroup" aria-label="Crop">
+              {Object.keys(eco.cultivos).map((name) => (
+                <button
+                  key={name}
+                  type="button"
+                  role="radio"
+                  aria-checked={name === cropName}
+                  className="cm-crop"
+                  onClick={() => pickCrop(name)}
+                >
+                  <span className="cm-emoji">{cropIcon(name)}</span>
+                  <span className="cm-crop-name">{name}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </nav>
+
+        {/* ---------- Main column: fixed month strip + scrolling charts ---------- */}
+        <div className="cm-main">
+          <section className="cm-strip">
+            <div className="cm-strip-head">
+              <h2 className="cm-label" title="The dot shows how it would have gone sowing in that month">
+                When to plant
+              </h2>
+            </div>
+
+            <div className="cm-months">
+              {MONTHS.map((name, i) => {
+                const month = i + 1;
+                const p = byStartMonth[i];
+                const v = p ? combine(p.vT, vPh, p.vR) : "none";
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    className="cm-month"
+                    aria-pressed={month === sowMonth}
+                    onClick={() => pickMonth(month)}
+                    title={`${name}: ${VERDICT_LABEL[v].toLowerCase()}`}
+                  >
+                    {name.slice(0, 3)}
+                    <span className="cm-dot" style={{ background: VERDICT_COLOR[v] }} />
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="cm-cycle">
+              <span className="cm-cycle-label">Cycle</span>
+              <strong>
+                {nMonths} {nMonths === 1 ? "month" : "months"}
+              </strong>
+              <span className="cm-cycle-range">
+                {MONTHS[sowMonth - 1]} → {endMonthName}
+              </span>
+            </div>
+          </section>
+
+          <div className="cm-scroll">
+            {/* ---------- Three main charts: pH, rainfall, temperature ---------- */}
+            {crop && (
+              <section className="cm-panel cm-charts">
+                {/* pH */}
+                <div className="cm-s3 cm-chart">
+                  <div className="cm-chart-head">
+                    <h3 className="cm-h3">Soil pH</h3>
+                    {phRange && phValue && (
+                      <Badge v={vPh} text={`${fmt(phValue.mean, 1)} · ${FACTOR_LABEL[vPh]}`} />
                     )}
                   </div>
-
-                  <div className="cm-vert">
-                    <h3 className="cm-h3">Lluvia del ciclo</h3>
-                    {rangoLluvia && (
-                      <p className="cm-rango">
-                        Ideal {rangoLluvia.optMin !== null ? formatear(rangoLluvia.optMin) : "?"}–
-                        {rangoLluvia.optMax !== null ? formatear(rangoLluvia.optMax) : "?"} · Tolera{" "}
-                        {rangoLluvia.min !== null ? formatear(rangoLluvia.min) : "?"}–
-                        {rangoLluvia.max !== null ? formatear(rangoLluvia.max) : "?"} mm
+                  {phRange && (
+                    <p className="cm-range">
+                      Ideal {phRange.optMin ?? "?"}–{phRange.optMax ?? "?"} · Tolerates {phRange.min ?? "?"}–{phRange.max ?? "?"}
+                    </p>
+                  )}
+                  {!phRange && <p className="cm-empty">EcoCrop has no pH range for this crop.</p>}
+                  {phRange && !phCur && <p className="cm-empty">Querying SoilGrids…</p>}
+                  {phRange && phCur?.error && (
+                    <div>
+                      <p className="cm-error">{phCur.error}</p>
+                      <p style={{ marginTop: 8 }}>
+                        <button type="button" className="cm-btn sec" onClick={() => setAttempt((n) => n + 1)}>
+                          Retry
+                        </button>
                       </p>
+                    </div>
+                  )}
+                  {phRange && phValue && (
+                    <>
+                      <VerticalGauge
+                        value={phValue.mean}
+                        low={phValue.p5}
+                        high={phValue.p95}
+                        range={phRange}
+                        dec={1}
+                        aria={`Soil pH ${phValue.mean} against the range the crop tolerates`}
+                        valueTooltip={`Estimated pH: ${fmt(phValue.mean, 1)}`}
+                        rangeTooltip={`Model uncertainty: ${fmt(phValue.p5, 1)} to ${fmt(phValue.p95, 1)}`}
+                      />
+                      <p className="cm-small">
+                        Between {fmt(phValue.p5, 1)} and {fmt(phValue.p95, 1)} (0–30 cm). Satellite-based estimate.
+                      </p>
+                    </>
+                  )}
+                </div>
+
+                {/* Rainfall */}
+                <div className="cm-s3 cm-chart">
+                  <div className="cm-chart-head">
+                    <h3 className="cm-h3">Cycle rainfall</h3>
+                    {rainRange && rainSummary && (
+                      <Badge v={vRain} text={`${fmt(rainSummary.median)} mm · ${FACTOR_LABEL[vRain]}`} />
                     )}
-                    {!rangoLluvia && (
-                      <p className="cm-vacio">EcoCrop no trae rango de lluvia para este cultivo.</p>
-                    )}
-                    {rangoLluvia && !datosEra && !eraActual?.error && (
-                      <p className="cm-vacio">Consultando ERA5…</p>
-                    )}
-                    {rangoLluvia && eraActual?.error && (
-                      <div>
-                        <p className="cm-error">{eraActual.error}</p>
-                        <p style={{ marginTop: 8 }}>
-                          <button type="button" className="cm-boton sec" onClick={() => setIntento((n) => n + 1)}>
-                            Reintentar
-                          </button>
-                        </p>
-                      </div>
-                    )}
-                    {rangoLluvia && datosEra && !resLluvia && (
-                      <p className="cm-vacio">No hay ciclos completos con datos de lluvia para este mes.</p>
-                    )}
-                    {rangoLluvia && resLluvia && (
-                      <>
-                        <MedidorVertical
-                          valor={resLluvia.mediana}
-                          bajo={resLluvia.p10}
-                          alto={resLluvia.p90}
-                          rango={rangoLluvia}
-                          dec={0}
-                          desdeCero
-                          aria={`Lluvia típica del ciclo de ${formatear(resLluvia.mediana)} mm frente al rango que tolera el cultivo`}
-                          tooltipValor={`Lluvia típica del ciclo: ${formatear(resLluvia.mediana)} mm`}
-                          tooltipRango={`Años típicos: ${formatear(resLluvia.p10)} a ${formatear(resLluvia.p90)} mm`}
-                        />
-                        <p
-                          className="cm-dato-grande"
-                          style={{ color: COLOR_VEREDICTO[vLluvia] }}
+                  </div>
+                  {rainRange && (
+                    <p className="cm-range">
+                      Ideal {rainRange.optMin !== null ? fmt(rainRange.optMin) : "?"}–
+                      {rainRange.optMax !== null ? fmt(rainRange.optMax) : "?"} · Tolerates{" "}
+                      {rainRange.min !== null ? fmt(rainRange.min) : "?"}–
+                      {rainRange.max !== null ? fmt(rainRange.max) : "?"} mm
+                    </p>
+                  )}
+                  {!rainRange && <p className="cm-empty">EcoCrop has no rainfall range for this crop.</p>}
+                  {rainRange && !eraData && !eraCur?.error && <p className="cm-empty">Querying ERA5…</p>}
+                  {rainRange && eraCur?.error && (
+                    <div>
+                      <p className="cm-error">{eraCur.error}</p>
+                      <p style={{ marginTop: 8 }}>
+                        <button type="button" className="cm-btn sec" onClick={() => setAttempt((n) => n + 1)}>
+                          Retry
+                        </button>
+                      </p>
+                    </div>
+                  )}
+                  {rainRange && eraData && !rainSummary && (
+                    <p className="cm-empty">There are no complete cycles with rainfall data for this month.</p>
+                  )}
+                  {rainRange && rainSummary && (
+                    <>
+                      <VerticalGauge
+                        value={rainSummary.median}
+                        low={rainSummary.p10}
+                        high={rainSummary.p90}
+                        range={rainRange}
+                        dec={0}
+                        fromZero
+                        aria={`Typical cycle rainfall of ${fmt(rainSummary.median)} mm against the range the crop tolerates`}
+                        valueTooltip={`Typical cycle rainfall: ${fmt(rainSummary.median)} mm`}
+                        rangeTooltip={`Typical years: ${fmt(rainSummary.p10)} to ${fmt(rainSummary.p90)} mm`}
+                      />
+                      <p className="cm-small">
+                        {nMonths} {nMonths === 1 ? "month" : "months"} from {monthLower}. Most years:{" "}
+                        {fmt(rainSummary.p10)}–{fmt(rainSummary.p90)} mm.
+                      </p>
+                    </>
+                  )}
+                </div>
+
+                {/* Temperature */}
+                <div className="cm-s6 cm-chart">
+                  <div className="cm-chart-head">
+                    <h3 className="cm-h3">Temperature during the cycle</h3>
+                    {sel?.a && <Badge v={vTemp} text={`${sel.a.cycleOk} of ${sel.a.n} years fine`} />}
+                  </div>
+                  <p className="cm-range">
+                    Ideal {crop.temperatura.optMin ?? "?"}–{crop.temperatura.optMax ?? "?"} °C · Tolerates{" "}
+                    {crop.temperatura.min ?? "?"}–{crop.temperatura.max ?? "?"} °C
+                  </p>
+                  {!powerData && !powerCur?.error && <p className="cm-empty">Fetching the climate of recent years…</p>}
+                  {powerCur?.error && <p className="cm-empty">No temperature data (see above).</p>}
+                  {powerData && !sel?.a && (
+                    <p className="cm-empty">
+                      There are no complete cycles with data for this window (NASA publishes with a delay and the cycle
+                      may include future months).
+                    </p>
+                  )}
+                  {powerData && sel?.a && (
+                    <>
+                      <TemperatureChart a={sel.a} names={cycleNames} range={crop.temperatura} />
+                      <p className="cm-small">
+                        {sel.a.critical
+                          ? `Most delicate month: ${cycleNames[sel.a.critical.month]}.`
+                          : "In no year did it leave the range the crop tolerates."}
+                      </p>
+                    </>
+                  )}
+                </div>
+
+                <ul className="cm-legend cm-s12">
+                  <li>
+                    <span className="cm-swatch" style={{ background: C.ideal }} /> Ideal
+                  </li>
+                  <li>
+                    <span className="cm-swatch" style={{ background: C.tolerated }} /> Tolerated range
+                  </li>
+                  <li>
+                    <span className="cm-swatch" style={{ background: "rgba(57,125,164,.45)", height: 3 }} /> Each past
+                    year
+                  </li>
+                  <li>
+                    <span className="cm-swatch" style={{ background: C.ink, height: 3 }} /> Typical year
+                  </li>
+                </ul>
+              </section>
+            )}
+
+            {/* ---------- Crop rotation panel: always visible ---------- */}
+            {crop && (
+              <section className="cm-panel cm-rotation">
+                <div className="cm-rotation-head">
+                  <h2 className="cm-label">Crop rotation</h2>
+                  {chain.length > 0 && (
+                    <button type="button" className="cm-btn sec cm-reset" onClick={() => setChain([])}>
+                      Start over
+                    </button>
+                  )}
+                </div>
+
+                <p className="cm-note">
+                  Plan what to sow after this crop. When the current cycle ends, you get the crops that would fit
+                  in the following month (same climate and soil criteria). Pick one to add it to the path, and keep
+                  chaining steps. The charts above show the last step of the path.
+                </p>
+
+                <ol className="cm-path" aria-label="Rotation path">
+                  {rotationSteps.map((s, i) => (
+                    <li key={i}>
+                      <button
+                        type="button"
+                        className="cm-path-step"
+                        aria-current={i === rotationSteps.length - 1 ? "step" : undefined}
+                        onClick={() => setChain(chain.slice(0, i))}
+                        title={i === rotationSteps.length - 1 ? "Current step" : "Go back to this step"}
+                      >
+                        <span className="cm-emoji-sm">{cropIcon(s.crop)}</span>
+                        {s.crop}
+                        <span className="cm-path-month">{MONTHS[s.month - 1].slice(0, 3)}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ol>
+
+                <div className="cm-next">
+                  <span className="cm-rot-lead">Next, in {MONTHS[nextMonth - 1]}:</span>
+                  <div className="cm-chips">
+                    {!eco || climateLoading ? (
+                      <span className="cm-loading">Loading…</span>
+                    ) : climateFailed ? (
+                      <span className="cm-loading">No climate data available.</span>
+                    ) : rotationOptions.length === 0 ? (
+                      <span className="cm-loading">
+                        No other crop fits well in {MONTHS[nextMonth - 1]} here. Go back a step or pick another crop.
+                      </span>
+                    ) : (
+                      rotationOptions.map((o) => (
+                        <button
+                          key={o.name}
+                          type="button"
+                          className="cm-chip"
+                          onClick={() => addRotation(o.name)}
+                          title={`${o.name}: ${VERDICT_LABEL[o.verdict].toLowerCase()} · ${o.nMonths} ${
+                            o.nMonths === 1 ? "month" : "months"
+                          } cycle`}
                         >
-                          {formatear(resLluvia.mediana)} mm
-                        </p>
-                        <p className="cm-chico">
-                          Total de {nMeses} {nMeses === 1 ? "mes" : "meses"} desde {MESES[mesSiembra - 1].toLowerCase()}.
-                          Mediana de {resLluvia.n} años; la mayoría cae entre {formatear(resLluvia.p10)} y{" "}
-                          {formatear(resLluvia.p90)} mm.
-                          {resLluvia.secos > 0 &&
-                            ` ${resLluvia.secos} ${resLluvia.secos === 1 ? "mes" : "meses"} del ciclo con menos de ${MES_SECO_MM} mm.`}
-                        </p>
-                        {et0Ciclo !== null && (
-                          <p className="cm-chico">
-                            Evaporación potencial (ET0) del ciclo: {formatear(et0Ciclo)} mm
-                            {cobertura !== null && ` · la lluvia cubre cerca del ${formatear(cobertura * 100)} %`}. Es
-                            solo un dato: no cambia el resultado.
-                          </p>
-                        )}
-                      </>
+                          <span className="cm-emoji-sm">{cropIcon(o.name)}</span>
+                          {o.name}
+                          <span className="cm-dot" style={{ background: VERDICT_COLOR[o.verdict] }} />
+                        </button>
+                      ))
                     )}
                   </div>
                 </div>
+              </section>
+            )}
 
-                <ul className="cm-leyenda">
-                  <li>
-                    <span className="cm-muestra" style={{ background: C.ideal }} /> Ideal
-                  </li>
-                  <li>
-                    <span className="cm-muestra" style={{ background: C.tolera }} /> Lo que tolera
-                  </li>
-                  <li>
-                    <span className="cm-muestra" style={{ background: C.suave, height: 3 }} /> Rango del dato
-                  </li>
-                </ul>
-                <p className="cm-chico">
-                  El pH es del lugar y no cambia con el mes. La lluvia sí cambia: se suma durante el ciclo desde el mes
-                  de siembra elegido.
-                </p>
-              </div>
+            {/* ---------- Secondary row: water balance and reading ---------- */}
+            {crop && (
+              <section className="cm-panel cm-support">
+                <div className="cm-support-title cm-s12">
+                  <h2 className="cm-label">Supporting data</h2>
+                  <p className="cm-note">They do not change the result.</p>
+                </div>
 
-              {/* Derecha: temperatura */}
-              <div>
-                <h3 className="cm-h3">Temperatura durante el ciclo</h3>
-                <p className="cm-rango">
-                  Ideal {cultivo.temperatura.optMin ?? "?"}–{cultivo.temperatura.optMax ?? "?"} °C · Tolera{" "}
-                  {cultivo.temperatura.min ?? "?"}–{cultivo.temperatura.max ?? "?"} °C
-                </p>
-                {!datosPower && !actual?.error && <p className="cm-vacio">Consultando el clima de los últimos años…</p>}
-                {actual?.error && <p className="cm-vacio">No hay datos de temperatura (ver arriba).</p>}
-                {datosPower && !sel?.a && (
-                  <p className="cm-vacio">
-                    No hay ciclos completos con datos para esta ventana (NASA publica con retraso y el ciclo puede
-                    incluir meses futuros).
-                  </p>
-                )}
-                {datosPower && sel?.a && (
-                  <>
-                    <GraficaTemperatura a={sel.a} nombres={nombresCiclo} rango={cultivo.temperatura} />
-                    <ul className="cm-leyenda">
-                      <li>
-                        <span className="cm-muestra" style={{ background: C.ideal }} /> Ideal
-                      </li>
-                      <li>
-                        <span className="cm-muestra" style={{ background: C.tolera }} /> Lo que tolera
-                      </li>
-                      <li>
-                        <span className="cm-muestra" style={{ background: "rgba(57,125,164,.45)", height: 3 }} /> Cada
-                        año pasado
-                      </li>
-                      <li>
-                        <span className="cm-muestra" style={{ background: C.tinta, height: 3 }} /> Año típico
-                      </li>
+                <div className="cm-s7">
+                  <h3 className="cm-h3">Water balance (typical year)</h3>
+                  <p className="cm-range">Rainfall of each month against potential evaporation (ET0)</p>
+                  {monthlyCycle ? (
+                    <WaterBalanceChart rain={monthlyCycle.rain} et0={monthlyCycle.et0} names={cycleNames} />
+                  ) : (
+                    <p className="cm-empty">
+                      {eraCur?.error
+                        ? "No ERA5 data."
+                        : !eraData
+                        ? "Querying ERA5…"
+                        : "There are no complete cycles with data."}
+                    </p>
+                  )}
+                  <ul className="cm-legend">
+                    <li>
+                      <span className="cm-swatch" style={{ background: C.years }} /> Monthly rainfall
+                    </li>
+                    <li>
+                      <span className="cm-swatch" style={{ background: C.caution, height: 3 }} /> Monthly ET0
+                    </li>
+                  </ul>
+                </div>
+
+                <div className="cm-s5 cm-reading">
+                  <h3 className="cm-h3">What the water says</h3>
+                  {monthlyCycle ? (
+                    <ul>
+                      {et0Cycle !== null && coverageText && (
+                        <li>
+                          Cycle ET0: <b>{fmt(et0Cycle)} mm</b>. Rainfall equals <b>{coverageText}</b>.
+                        </li>
+                      )}
+                      {deficitMonths !== null && (
+                        <li>
+                          {deficitMonths === 0
+                            ? "No month of the typical cycle has more evaporation than rainfall."
+                            : `${deficitMonths} of ${nMonths} months have more evaporation than rainfall.`}
+                        </li>
+                      )}
+                      {rainSummary && rainSummary.dry > 0 && (
+                        <li>
+                          {rainSummary.dry} {rainSummary.dry === 1 ? "month" : "months"} with less than {DRY_MONTH_MM} mm.
+                        </li>
+                      )}
+                      {coverage !== null && coverage < ET0_WARNING_RATIO && <li>Irrigation may be needed.</li>}
+                      {frost && frost.below > 0 && tLethal !== null && (
+                        <li>
+                          In {frost.below} of {frost.n} years the daily minimum dropped below {fmt(tLethal)} °C (lethal
+                          temperature).
+                        </li>
+                      )}
                     </ul>
-                    <div className="cm-mesgrid">
-                      {sel.a.porMes.map((m, i) => {
-                        const nivel = nivelDeMes(m);
-                        return (
-                          <div key={i} className="cm-mescard" style={{ borderTopColor: COLOR_NIVEL[nivel] }}>
-                            <b>{nombresCiclo[i]}</b>
-                            <span className="t">{formatear(m.mediana)} °C</span>
-                            <div className="e" style={{ color: COLOR_NIVEL[nivel] }}>
-                              {TEXTO_NIVEL[nivel]}
-                            </div>
-                            <div className="a">
-                              {m.ok} de {m.n} años bien
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
-          </section>
-        )}
+                  ) : (
+                    <p className="cm-empty">No data yet.</p>
+                  )}
+                </div>
+              </section>
+            )}
 
-        <details className="cm-det">
-          <summary>Cómo se decide</summary>
-          <p>
-            <strong>Temperatura.</strong> Cada mes del ciclo se compara con el rango de temperatura que FAO EcoCrop
-            da para el cultivo, usando la temperatura media mensual de NASA POWER. Un año "cumple" si todos los meses
-            de su ciclo estuvieron dentro de lo que el cultivo tolera. Si eso pasó en el {Math.round(UMBRAL_SI * 100)} %
-            de los años o más, la respuesta es sí; entre {Math.round(UMBRAL_CUIDADO * 100)} % y{" "}
-            {Math.round(UMBRAL_SI * 100)} %, con cuidado; por debajo, no. Si la temperatura típica de algún mes ya
-            queda fuera del rango, también es no. Estos porcentajes son un criterio propio de esta herramienta, no un
-            dato de FAO.
-          </p>
-          <p>
-            <strong>Lluvia del ciclo.</strong> ERA5 entrega la lluvia diaria. Se suma por mes y, para cada año pasado,
-            se suman los meses del ciclo que empieza en el mes de siembra elegido. La lluvia típica (mediana) se
-            compara con el rango de lluvia de EcoCrop, que corresponde al ciclo del cultivo y no al año calendario:
-            ideal si cae en el rango óptimo, tolerable si cae en el rango absoluto, no conviene si queda fuera.
-            Además, si menos del {Math.round(UMBRAL_SI * 100)} % de los años quedó dentro de lo que tolera, el
-            resultado baja. Como el total no dice cuándo llueve, se avisa cuántos meses del ciclo típico tienen menos
-            de {MES_SECO_MM} mm (ese aviso no cambia el resultado). Si llueve menos del mínimo, el cultivo podría
-            sembrarse con riego.
-          </p>
-          <p>
-            <strong>Evaporación potencial (ET0).</strong> ERA5 también da la ET0 diaria (FAO Penman-Monteith). Se suma
-            en el ciclo y se compara con la lluvia solo como dato y aviso (cuando la lluvia cubre menos del{" "}
-            {Math.round(RATIO_ET0_AVISO * 100)} %). EcoCrop no tiene un rango de evapotranspiración y la ET0 no es la
-            demanda real del cultivo (para eso haría falta el coeficiente Kc de cada etapa), por eso no pesa en el
-            resultado.
-          </p>
-          <p>
-            <strong>pH del suelo.</strong> Ideal si cae en el rango óptimo de EcoCrop, tolerable si cae en el rango
-            absoluto, no conviene si queda fuera. Es un valor fijo del lugar: no cambia con el mes ni con los años.
-          </p>
-          <p>
-            <strong>Resultado final.</strong> Manda el peor de los factores (ley del mínimo), no un promedio. No es un
-            pronóstico: describe lo que pasó en esos mismos meses durante los años pasados. Para la temperatura se usa
-            la media mensual, así que una helada o una ola de calor de pocos días no se ve en el veredicto; si el
-            cultivo tiene temperatura letal en EcoCrop, se muestra un aviso con la mínima diaria de ERA5. No se
-            evalúan altitud ni otras propiedades del suelo. Es una guía para orientarse: consultá a un técnico
-            agrícola antes de decidir.
-          </p>
-          <p>
-            Datos: temperatura media, NASA POWER (comunidad AG, T2M, grilla de baja resolución) · Lluvia, ET0 y mínima
-            diaria: ERA5 (ECMWF/Copernicus) servido por Open-Meteo (~25 km; en zonas de montaña un punto cercano
-            puede dar valores distintos) · Suelo: ISRIC SoilGrids (pH en agua, 0–30 cm) · Rangos y duración del ciclo:
-            FAO EcoCrop (copia OpenCLIM; ciclo = mínimo + 1 mes, con 1 mes = 30 días) · Búsqueda de lugares:
-            Open-Meteo · Mapa: OpenStreetMap.
-          </p>
-        </details>
+            <details className="cm-details">
+              <summary>How it is decided</summary>
+              <p>
+                <strong>Temperature.</strong> Each month of the cycle is compared against the temperature range FAO
+                EcoCrop gives for the crop, using the monthly mean temperature from NASA POWER. A year passes if every
+                month of its cycle stayed within what the crop tolerates. If that happened in{" "}
+                {Math.round(YES_THRESHOLD * 100)} % of years or more, the answer is yes; between{" "}
+                {Math.round(CAUTION_THRESHOLD * 100)} % and {Math.round(YES_THRESHOLD * 100)} %, caution; below that,
+                no. If the typical temperature of any month is already outside the range, it is also a no. These
+                percentages are this tool&apos;s own criterion, not FAO data.
+              </p>
+              <p>
+                <strong>Cycle rainfall.</strong> ERA5 provides daily rainfall. It is summed by month and, for each past
+                year, over the months of the cycle that starts in the chosen sowing month. The typical value (median)
+                is compared with the EcoCrop rainfall range, which refers to the crop cycle and not the calendar year:
+                ideal if it falls in the optimal range, tolerable if it falls in the absolute range, not recommended
+                if it falls outside. In addition, if fewer than {Math.round(YES_THRESHOLD * 100)} % of years fall
+                within what the crop tolerates, the result is lowered. Since a total does not say when it rains, the
+                tool also reports how many months of the typical cycle have less than {DRY_MONTH_MM} mm (this warning
+                does not change the result). If rainfall is below the minimum, the crop could still be grown with
+                irrigation.
+              </p>
+              <p>
+                <strong>Potential evaporation (ET0).</strong> ERA5 also gives daily ET0 (FAO Penman-Monteith). It is
+                summed over the cycle and compared with rainfall only as information and a warning (when rainfall
+                covers less than {Math.round(ET0_WARNING_RATIO * 100)} %). EcoCrop has no evapotranspiration range and
+                ET0 is not the real crop demand (that would need the Kc coefficient of each stage), so it does not
+                weigh on the result.
+              </p>
+              <p>
+                <strong>Soil pH.</strong> Ideal if it falls in the EcoCrop optimal range, tolerable if it falls in the
+                absolute range, not recommended if it falls outside. It is a fixed value of the place: it does not
+                change with the month or the years. It is a satellite-based estimate: a soil test is more reliable.
+              </p>
+              <p>
+                <strong>Crop rotation.</strong> After the current cycle ends, every other crop in the list is
+                evaluated for the month that follows, using the same criteria (temperature, cycle rainfall and soil
+                pH). Crops rated good or caution are suggested, and you can chain several steps. This only considers
+                climate and soil: it does not take into account crop families, pests, diseases or soil nutrients,
+                which matter in a real rotation.
+              </p>
+              <p>
+                <strong>Final result.</strong> The worst of the factors rules (law of the minimum), not an average. It
+                is not a forecast: it describes what happened in those same months during past years. For temperature
+                the monthly mean is used, so a frost or heat wave lasting a few days is not visible in the verdict; if
+                the crop has a lethal temperature in EcoCrop, a warning is shown with the daily minimum from ERA5.
+                Altitude and other soil properties are not evaluated. It is a guide to get oriented: consult an
+                agricultural technician before deciding.
+              </p>
+              <p>
+                Data: mean temperature, NASA POWER (AG community, T2M, low-resolution grid) · Rainfall, ET0 and daily
+                minimum: ERA5 (ECMWF/Copernicus) served by Open-Meteo (~25 km; in mountain areas a nearby point can
+                give different values) · Soil: ISRIC SoilGrids (pH in water, 0–30 cm) · Ranges and cycle length: FAO
+                EcoCrop (OpenCLIM copy; cycle = minimum + 1 month, with 1 month = 30 days) · Place search: Open-Meteo ·
+                Map: MapLibre GL, OpenFreeMap sketch map with OpenStreetMap data and NASA GIBS Earth imagery (Blue
+                Marble).
+              </p>
+            </details>
+          </div>
+        </div>
       </div>
     </main>
   );
