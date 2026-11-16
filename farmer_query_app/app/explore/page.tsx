@@ -235,11 +235,19 @@ export default function ExplorePage() {
  
   // Si el script de globe.gl ya estaba cargado (navegación de vuelta a la página),
   // onLoad no se vuelve a disparar, así que lo revisamos manualmente.
+  // Detectar automáticamente cuando el script de globe.gl esté disponible en window
   useEffect(() => {
-    if (typeof window !== "undefined" && window.Globe) {
-      setGlobeReady(true);
-    }
-  }, []);
+    if (globeReady) return;
+    
+    const checkGlobe = setInterval(() => {
+      if (typeof window !== "undefined" && window.Globe) {
+        setGlobeReady(true);
+        clearInterval(checkGlobe);
+      }
+    }, 100);
+
+    return () => clearInterval(checkGlobe);
+  }, [globeReady]);
  
   // Consultar país y clima real de NASA POWER al hacer clic en el globo
   const analizarPuntoEnGlobo = async (lat: number, lon: number, customName?: string) => {
