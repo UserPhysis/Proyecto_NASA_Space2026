@@ -55,6 +55,68 @@ function cropIcon(name: string): string {
   return ICONS.find(([keys]) => keys.some((k) => n.includes(k)))?.[1] ?? "🌱";
 }
 
+/* ---------------- Crop display names (English) ---------------- */
+// The keys in ecocrop.json stay in Spanish (they are used as IDs); only the label shown changes.
+const CROP_NAMES: [string[], string][] = [
+  [["maiz", "maize"], "Maize"],
+  [["frijol", "poroto"], "Common bean"],
+  [["haba"], "Fava bean"],
+  [["soja", "soya"], "Soybean"],
+  [["arroz"], "Rice"],
+  [["trigo"], "Wheat"],
+  [["sorgo"], "Sorghum"],
+  [["cebada"], "Barley"],
+  [["avena"], "Oat"],
+  [["cafe"], "Coffee"],
+  [["tomate"], "Tomato"],
+  [["chile", "aji"], "Chili pepper"],
+  [["pimiento"], "Bell pepper"],
+  [["camote", "batata"], "Sweet potato"],
+  [["papa"], "Potato"],
+  [["yuca", "mandioca"], "Cassava"],
+  [["platano"], "Plantain"],
+  [["banano", "banana"], "Banana"],
+  [["cacao"], "Cacao"],
+  [["cana"], "Sugarcane"],
+  [["aguacate"], "Avocado"],
+  [["pina"], "Pineapple"],
+  [["naranja"], "Orange"],
+  [["limon"], "Lemon"],
+  [["mandarina"], "Mandarin"],
+  [["cebolla"], "Onion"],
+  [["zanahoria"], "Carrot"],
+  [["ayote", "calabaza", "zapallo"], "Squash"],
+  [["sandia"], "Watermelon"],
+  [["mango"], "Mango"],
+  [["coco"], "Coconut"],
+  [["papaya"], "Papaya"],
+  [["maracuya"], "Passion fruit"],
+  [["pepino"], "Cucumber"],
+  [["repollo", "col"], "Cabbage"],
+  [["lechuga"], "Lettuce"],
+  [["ajo"], "Garlic"],
+  [["garbanzo"], "Chickpea"],
+  [["lenteja"], "Lentil"],
+  [["mani", "cacahuate"], "Peanut"],
+  [["girasol"], "Sunflower"],
+  [["algodon"], "Cotton"],
+  [["tabaco"], "Tobacco"],
+  [["gandul", "guandul"], "Pigeon pea"],
+  [["chia"], "Chia"],
+  [["ajonjoli", "sesamo"], "Sesame"],
+];
+
+function cropLabel(name: string): string {
+  const norm = name
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+  const words = norm.split(/[^a-z]+/).filter(Boolean);
+  const hit = CROP_NAMES.find(([keys]) => keys.some((k) => words.includes(k)));
+  return hit ? hit[1] : name;
+}
+
 /* ---------------- Types ---------------- */
 
 // NASA POWER (monthly mean temperature)
@@ -1339,7 +1401,7 @@ export default function AnalyzeMyCropsPage() {
   const crop = eco?.cultivos[cropName] ?? null;
   const days = crop ? cycleDays(crop) : null;
   const nMonths = days ? Math.max(1, Math.round(days / 30)) : 1;
-  const cropLower = cropName.toLowerCase();
+  const cropLower = cropLabel(cropName).toLowerCase();
 
   // pH: does not depend on the month, so it is evaluated only once
   const phRange = crop && hasRange(crop.ph) ? crop.ph : null;
@@ -1624,7 +1686,7 @@ export default function AnalyzeMyCropsPage() {
                   onClick={() => pickCrop(name)}
                 >
                   <span className="cm-emoji">{cropIcon(name)}</span>
-                  <span className="cm-crop-name">{name}</span>
+                  <span className="cm-crop-name">{cropLabel(name)}</span>
                 </button>
               ))}
             </div>
@@ -1849,7 +1911,7 @@ export default function AnalyzeMyCropsPage() {
                         title={i === rotationSteps.length - 1 ? "Current step" : "Go back to this step"}
                       >
                         <span className="cm-emoji-sm">{cropIcon(s.crop)}</span>
-                        {s.crop}
+                        {cropLabel(s.crop)}
                         <span className="cm-path-month">{MONTHS[s.month - 1].slice(0, 3)}</span>
                       </button>
                     </li>
@@ -1874,12 +1936,12 @@ export default function AnalyzeMyCropsPage() {
                           type="button"
                           className="cm-chip"
                           onClick={() => addRotation(o.name)}
-                          title={`${o.name}: ${VERDICT_LABEL[o.verdict].toLowerCase()} · ${o.nMonths} ${
+                          title={`${cropLabel(o.name)}: ${VERDICT_LABEL[o.verdict].toLowerCase()} · ${o.nMonths} ${
                             o.nMonths === 1 ? "month" : "months"
                           } cycle`}
                         >
                           <span className="cm-emoji-sm">{cropIcon(o.name)}</span>
-                          {o.name}
+                          {cropLabel(o.name)}
                           <span className="cm-dot" style={{ background: VERDICT_COLOR[o.verdict] }} />
                         </button>
                       ))
