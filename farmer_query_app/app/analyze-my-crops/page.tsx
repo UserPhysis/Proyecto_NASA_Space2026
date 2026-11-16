@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import "./analyze-my-crops.css";
 
 /* ---------------- Configuración ---------------- */
 
@@ -17,6 +18,8 @@ const ANIOS_ATRAS = 20;
 const MIN_ANIOS = 8; // menos años completos que esto = "sin datos suficientes"
 const UMBRAL_SI = 0.8; // 80 % de los años o más → Sí conviene
 const UMBRAL_CUIDADO = 0.5; // entre 50 % y 80 % → Con cuidado; menos → No conviene
+const MES_SECO_MM = 50; // un mes con menos de esto cuenta como "seco" (solo advertencia)
+const RATIO_ET0_AVISO = 0.5; // si la lluvia del ciclo cubre menos de este % de la ET0, se avisa (sin peso)
 
 const MESES = [
   "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
@@ -25,10 +28,15 @@ const MESES = [
 
 /* ---------------- Tipos ---------------- */
 
+// NASA POWER (temperatura media mensual)
 type SerieMensual = Record<string, number>;
 type DatosPower = Record<string, SerieMensual>;
-type VariablePower = "T2M" | "PRECTOTCORR";
+type VariablePower = "T2M";
 type Resultado = { clave: string; datos: DatosPower | null; error: string | null };
+
+// ERA5 vía Open-Meteo (lluvia, ET0 y mínima diaria, agregadas por mes)
+type MesEra = { lluvia: number; et0: number | null; tMinAbs: number };
+type DatosEra = Record<string, MesEra>; // clave "YYYYMM"
 
 type Rango = {
   min: number | null;
@@ -39,14 +47,14 @@ type Rango = {
 type CultivoEco = {
   cientifico: string;
   temperatura: Rango;
+  tLetal?: number | null; // temperatura letal (KTMP), opcional: requiere volver a correr el script
   ph?: Rango;
-  precipitacion?: Rango; // mm acumulados
+  lluviaAnual?: Rango; // mm durante el ciclo del cultivo (así lo interpreta EcoCrop)
   cicloDias: { min: number | null; max: number | null };
 };
 type EcoCrop = { fuente: string; cultivos: Record<string, CultivoEco> };
 
 type Curva = { anioSiembra: number; valores: number[] };
-type LluviaCiclo = { anioSiembra: number; total: number };
 type Clase = "optimo" | "absoluto" | "fuera";
 type Veredicto = "si" | "cuidado" | "no" | "sin";
 type NivelMes = "bien" | "justo" | "riesgo";
@@ -70,6 +78,15 @@ type Analisis = {
   critico: { mes: number; fallos: number } | null;
 };
 
+type ResumenLluvia = {
+  n: number;
+  mediana: number; // lluvia total del ciclo, año típico
+  p10: number;
+  p90: number;
+  ok: number; // años con lluvia del ciclo dentro de lo que tolera
+  secos: number; // meses del ciclo cuya lluvia típica es menor a MES_SECO_MM
+};
+
 /* ---------------- Utilidades ---------------- */
 
 function formatear(valor: number, decimales = 0) {
@@ -87,6 +104,10 @@ function tieneRango(r: Rango | undefined | null): r is Rango {
   return !!r && (r.min !== null || r.optMin !== null || r.optMax !== null || r.max !== null);
 }
 
+const diasEnMes = (anio: number, mes: number) => new Date(anio, mes, 0).getDate();
+
+/* ---------------- Temperatura: NASA POWER ---------------- */
+
 async function pedirDatosPower(
   u: Ubicacion,
   desde: number,
@@ -94,7 +115,7 @@ async function pedirDatosPower(
   signal: AbortSignal
 ): Promise<DatosPower> {
   const params = new URLSearchParams({
-    parameters: "T2M,PRECTOTCORR",
+    parameters: "T2M",
     community: "AG",
     latitude: String(u.lat),
     longitude: String(u.lon),
@@ -146,35 +167,149 @@ function curvasMensuales(datos: DatosPower, mesSiembra: number, nMeses: number, 
   return completas;
 }
 
-const diasEnMes = (anio: number, mes: number) => new Date(anio, mes, 0).getDate();
+/* ---------------- Lluvia, ET0 y mínima diaria: ERA5 vía Open-Meteo ---------------- */
 
-// Lluvia acumulada del ciclo (mm) por año de siembra. POWER da mm/día promedio de cada mes:
-// se multiplica por los días del mes y se suman los meses del ciclo.
-function lluviaPorCiclo(datos: DatosPower, mesSiembra: number, nMeses: number, anios: number[]): LluviaCiclo[] {
-  const res: LluviaCiclo[] = [];
+// Caché por coordenadas para no repetir la descarga de 20 años de datos diarios.
+const cacheEra = new Map<string, DatosEra>();
+
+// Se usa el modelo "era5", no "era5_land": con era5_land la lluvia llega vacía.
+async function pedirDatosEra(
+  u: Ubicacion,
+  desde: number,
+  hasta: number,
+  signal: AbortSignal
+): Promise<DatosEra> {
+  const claveCache = `${u.lat},${u.lon},${desde},${hasta}`;
+  const guardado = cacheEra.get(claveCache);
+  if (guardado) return guardado;
+
+  // ERA5 publica con ~5 días de retraso
+  const limite = new Date(Date.now() - 7 * 864e5);
+  const fin =
+    hasta >= limite.getFullYear() ? limite.toISOString().slice(0, 10) : `${hasta}-12-31`;
+
+  const params = new URLSearchParams({
+    latitude: String(u.lat),
+    longitude: String(u.lon),
+    start_date: `${desde}-01-01`,
+    end_date: fin,
+    daily: "precipitation_sum,temperature_2m_min,et0_fao_evapotranspiration",
+    models: "era5",
+    timezone: "auto",
+  });
+
+  let res: Response;
+  try {
+    res = await fetch(`https://archive-api.open-meteo.com/v1/archive?${params.toString()}`, {
+      signal: AbortSignal.any([signal, AbortSignal.timeout(45000)]),
+    });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "TimeoutError") {
+      throw new Error("Open-Meteo (ERA5) tardó más de 45 segundos en responder. Probá de nuevo.");
+    }
+    throw e;
+  }
+  if (!res.ok) throw new Error(`Open-Meteo (ERA5) respondió con error ${res.status}`);
+
+  const json = await res.json();
+  const d = json?.daily;
+  if (!d?.time || !d?.precipitation_sum || !d?.temperature_2m_min) {
+    throw new Error("La respuesta de ERA5 no tiene el formato esperado");
+  }
+  const et0Diaria: (number | null)[] | undefined = d.et0_fao_evapotranspiration;
+
+  const acc: Record<string, { n: number; p: number; tmin: number; nE: number; e: number }> = {};
+  (d.time as string[]).forEach((dia, i) => {
+    const p = d.precipitation_sum[i];
+    const tm = d.temperature_2m_min[i];
+    if (p == null || tm == null) return;
+    const k = dia.slice(0, 4) + dia.slice(5, 7);
+    const a = (acc[k] ??= { n: 0, p: 0, tmin: Infinity, nE: 0, e: 0 });
+    a.n++;
+    a.p += p;
+    a.tmin = Math.min(a.tmin, tm);
+    const e = et0Diaria?.[i];
+    if (e != null) {
+      a.nE++;
+      a.e += e;
+    }
+  });
+
+  const out: DatosEra = {};
+  for (const [k, a] of Object.entries(acc)) {
+    const dias = diasEnMes(Number(k.slice(0, 4)), Number(k.slice(4)));
+    if (a.n < dias) continue; // solo meses completos
+    out[k] = { lluvia: a.p, et0: a.nE >= dias ? a.e : null, tMinAbs: a.tmin };
+  }
+  if (Object.keys(out).length === 0) throw new Error("ERA5 no devolvió meses completos para este punto.");
+
+  cacheEra.set(claveCache, out);
+  return out;
+}
+
+function mesEra(datos: DatosEra, anio: number, mes: number): MesEra | null {
+  return datos[`${anio}${String(mes).padStart(2, "0")}`] ?? null;
+}
+
+// Valores mensuales (mm) de cada año de siembra con ciclo completo: un arreglo de nMeses por año.
+function ciclosEra(
+  datos: DatosEra,
+  campo: "lluvia" | "et0",
+  mesSiembra: number,
+  nMeses: number,
+  anios: number[]
+): number[][] {
+  const ciclos: number[][] = [];
   for (const anioSiembra of anios) {
-    let total = 0;
-    let completa = true;
+    const mensual: number[] = [];
+    let completo = true;
     for (let i = 0; i < nMeses; i++) {
       const idx = mesSiembra - 1 + i;
-      const a = anioSiembra + Math.floor(idx / 12);
-      const m = (idx % 12) + 1;
-      const v = valorMensual(datos, "PRECTOTCORR", a, m);
-      if (v === null) {
-        completa = false;
+      const m = mesEra(datos, anioSiembra + Math.floor(idx / 12), (idx % 12) + 1);
+      const v = m ? m[campo] : null;
+      if (v === null || v === undefined) {
+        completo = false;
         break;
       }
-      total += v * diasEnMes(a, m);
+      mensual.push(v);
     }
-    if (completa) res.push({ anioSiembra, total });
+    if (completo) ciclos.push(mensual);
   }
-  return res;
+  return ciclos;
+}
+
+// Temperatura mínima diaria más baja de cada ciclo completo (para temperatura letal).
+function minimasDelCiclo(datos: DatosEra, mesSiembra: number, nMeses: number, anios: number[]): number[] {
+  const minimas: number[] = [];
+  for (const anioSiembra of anios) {
+    let minimo = Infinity;
+    let completo = true;
+    for (let i = 0; i < nMeses; i++) {
+      const idx = mesSiembra - 1 + i;
+      const m = mesEra(datos, anioSiembra + Math.floor(idx / 12), (idx % 12) + 1);
+      if (!m) {
+        completo = false;
+        break;
+      }
+      minimo = Math.min(minimo, m.tMinAbs);
+    }
+    if (completo) minimas.push(minimo);
+  }
+  return minimas;
 }
 
 function mediana(valores: number[]): number {
   const s = [...valores].sort((a, b) => a - b);
   const m = Math.floor(s.length / 2);
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+function percentil(valores: number[], p: number): number {
+  const s = [...valores].sort((a, b) => a - b);
+  const i = (p / 100) * (s.length - 1);
+  const lo = Math.floor(i);
+  const hi = Math.ceil(i);
+  return s[lo] + (s[hi] - s[lo]) * (i - lo);
 }
 
 function clasificarRango(v: number, r: Rango): Clase {
@@ -241,21 +376,34 @@ function analizar(curvas: Curva[], rango: Rango, nMeses: number): Analisis | nul
   return { n, curvas, porMes, cicloOk, critico };
 }
 
+function resumirLluvia(ciclos: number[][], rango: Rango, nMeses: number): ResumenLluvia | null {
+  if (ciclos.length === 0) return null;
+  const totales = ciclos.map((c) => c.reduce((s, v) => s + v, 0));
+  let secos = 0;
+  for (let i = 0; i < nMeses; i++) {
+    if (mediana(ciclos.map((c) => c[i])) < MES_SECO_MM) secos++;
+  }
+  return {
+    n: totales.length,
+    mediana: mediana(totales),
+    p10: percentil(totales, 10),
+    p90: percentil(totales, 90),
+    ok: totales.filter((t) => clasificarRango(t, rango) !== "fuera").length,
+    secos,
+  };
+}
+
+// ET0 típica del ciclo (mediana de los totales). Solo informativa: no entra en el veredicto.
+function et0DelCiclo(ciclos: number[][]): number | null {
+  if (ciclos.length < MIN_ANIOS) return null;
+  return mediana(ciclos.map((c) => c.reduce((s, v) => s + v, 0)));
+}
+
 function veredictoTemperatura(a: Analisis | null, rango: Rango): Veredicto {
   if (!a || a.n < MIN_ANIOS) return "sin";
   const medianaFuera = a.porMes.some((m) => clasificarRango(m.mediana, rango) === "fuera");
   if (medianaFuera) return "no";
   const parte = a.cicloOk / a.n;
-  if (parte >= UMBRAL_SI) return "si";
-  if (parte >= UMBRAL_CUIDADO) return "cuidado";
-  return "no";
-}
-
-// Lluvia: se compara el total acumulado del ciclo de cada año con el rango de EcoCrop.
-function veredictoLluvia(totales: number[], rango: Rango): Veredicto {
-  if (totales.length < MIN_ANIOS) return "sin";
-  if (clasificarRango(mediana(totales), rango) === "fuera") return "no";
-  const parte = totales.filter((t) => clasificarRango(t, rango) !== "fuera").length / totales.length;
   if (parte >= UMBRAL_SI) return "si";
   if (parte >= UMBRAL_CUIDADO) return "cuidado";
   return "no";
@@ -270,6 +418,15 @@ function peor(vs: Veredicto[]): Veredicto {
   const ev = vs.filter((v) => v !== "sin");
   if (ev.length === 0) return "sin";
   return ev.reduce((a, b) => (GRAV[b] > GRAV[a] ? b : a));
+}
+
+// Lluvia del ciclo: manda lo típico (mediana frente al rango) y se baja si pocos años cumplen.
+function veredictoLluvia(r: ResumenLluvia | null, rango: Rango): Veredicto {
+  if (!r || r.n < MIN_ANIOS) return "sin";
+  const porMediana = VER_DE_CLASE[clasificarRango(r.mediana, rango)];
+  const parte = r.ok / r.n;
+  const porAnios: Veredicto = parte >= UMBRAL_SI ? "si" : parte >= UMBRAL_CUIDADO ? "cuidado" : "no";
+  return peor([porMediana, porAnios]);
 }
 
 // La temperatura es la que define si hay datos suficientes: si ella no se pudo evaluar,
@@ -344,19 +501,19 @@ async function pedirPh(u: Ubicacion, signal: AbortSignal): Promise<PhSuelo> {
   return { media: redondear(media), p5: redondear(p5), p95: redondear(p95) };
 }
 
-/* ---------------- Colores (también los usa el SVG) ---------------- */
+/* ---------------- Colores del SVG (mantener en sync con analyze-my-crops.css) ---------------- */
 
 const C = {
-  tinta: "#1c2a21",
-  suave: "#5d6b61",
-  linea: "#dde3d8",
-  ideal: "#bfe3cb",
-  tolera: "#e7f2e9",
-  anios: "#2f5d7c",
-  si: "#1f6b43",
-  cuidado: "#a06b00",
-  no: "#a8321f",
-  sin: "#7a857d",
+  tinta: "#243522",
+  suave: "#71806d",
+  linea: "#dfe8d7",
+  ideal: "#cfe5a3",
+  tolera: "#eaf3dc",
+  anios: "#397da4",
+  si: "#4f8f1f",
+  cuidado: "#bf8120",
+  no: "#b3402a",
+  sin: "#8a9683",
 };
 
 const COLOR_VEREDICTO: Record<Veredicto, string> = { si: C.si, cuidado: C.cuidado, no: C.no, sin: C.sin };
@@ -465,143 +622,99 @@ function GraficaTemperatura({ a, nombres, rango }: { a: Analisis; nombres: strin
   );
 }
 
-/* ---------------- Gráfica de pH: valor del suelo frente al rango del cultivo ---------------- */
+/* ---------------- Medidor vertical: un valor del lugar frente al rango del cultivo ---------------- */
+/* Sirve para el pH y para la lluvia del ciclo: no llevan eje de tiempo. */
 
-function GraficaPh({ ph, rango }: { ph: PhSuelo; rango: Rango }) {
-  const W = 640;
-  const H = 170;
-  const mI = 24;
-  const mD = 24;
-  const yB = 62;
-  const alto = 40;
+function MedidorVertical({
+  valor,
+  bajo,
+  alto,
+  rango,
+  dec,
+  desdeCero,
+  aria,
+  tooltipValor,
+  tooltipRango,
+}: {
+  valor: number;
+  bajo: number;
+  alto: number;
+  rango: Rango;
+  dec: number;
+  desdeCero?: boolean;
+  aria: string;
+  tooltipValor: string;
+  tooltipRango: string;
+}) {
+  const W = 180;
+  const H = 300;
+  const M = { izq: 46, arr: 14, abajo: 14 };
+  const barX = M.izq;
+  const barW = 60;
+  const alt = H - M.arr - M.abajo;
 
-  const puntos = [ph.media, ph.p5, ph.p95, rango.min, rango.optMin, rango.optMax, rango.max].filter(
+  const puntos = [valor, bajo, alto, rango.min, rango.optMin, rango.optMax, rango.max].filter(
     (v): v is number => v !== null
   );
   const lo = Math.min(...puntos);
   const hi = Math.max(...puntos);
   const pad = (hi - lo) * 0.08 || 0.5;
-  const a = lo - pad;
+  const a = desdeCero ? Math.max(0, lo - pad) : lo - pad;
   const b = hi + pad;
-  const ancho = W - mI - mD;
-  const x = (v: number) => mI + ((v - a) / (b - a)) * ancho;
-  const rec = (v: number) => x(Math.min(Math.max(v, a), b));
 
-  const izqAbs = rango.min !== null ? rec(rango.min) : x(a);
-  const derAbs = rango.max !== null ? rec(rango.max) : x(b);
-  const izqOpt = rango.optMin !== null ? rec(rango.optMin) : x(a);
-  const derOpt = rango.optMax !== null ? rec(rango.optMax) : x(b);
-  const color = COLOR_CLASE[clasificarRango(ph.media, rango)];
-  const ticks = ticksBonitos(a, b, 6);
+  const y = (v: number) => M.arr + alt - ((v - a) / (b - a)) * alt;
+  const rec = (v: number) => y(Math.min(Math.max(v, a), b));
+
+  const topAbs = rango.max !== null ? rec(rango.max) : M.arr;
+  const botAbs = rango.min !== null ? rec(rango.min) : M.arr + alt;
+  const topOpt = rango.optMax !== null ? rec(rango.optMax) : M.arr;
+  const botOpt = rango.optMin !== null ? rec(rango.optMin) : M.arr + alt;
+  const color = COLOR_CLASE[clasificarRango(valor, rango)];
+  const ticks = ticksBonitos(a, b, 5);
+  const cx = barX + barW / 2;
 
   return (
     <svg
       viewBox={`0 0 ${W} ${H}`}
       role="img"
-      aria-label={`pH del suelo ${ph.media} frente al rango que tolera el cultivo`}
-      style={{ width: "100%", height: "auto", display: "block" }}
+      aria-label={aria}
+      style={{ width: "100%", maxWidth: 200, height: "auto", display: "block", margin: "0 auto" }}
     >
-      <rect x={izqAbs} y={yB} width={Math.max(0, derAbs - izqAbs)} height={alto} fill={C.tolera} />
-      <rect x={izqOpt} y={yB} width={Math.max(0, derOpt - izqOpt)} height={alto} fill={C.ideal} />
-
-      {rango.min !== null && (
-        <g>
-          <line x1={x(rango.min)} x2={x(rango.min)} y1={yB - 8} y2={yB + alto} stroke={C.no} strokeDasharray="5 4" />
-          <text x={x(rango.min)} y={yB + alto + 28} textAnchor="middle" fontSize={11} fill={C.no}>
-            mín. {formatear(rango.min, 1)}
-          </text>
-        </g>
-      )}
-      {rango.max !== null && (
-        <g>
-          <line x1={x(rango.max)} x2={x(rango.max)} y1={yB - 8} y2={yB + alto} stroke={C.no} strokeDasharray="5 4" />
-          <text x={x(rango.max)} y={yB + alto + 28} textAnchor="middle" fontSize={11} fill={C.no}>
-            máx. {formatear(rango.max, 1)}
-          </text>
-        </g>
-      )}
+      <rect x={barX} y={topAbs} width={barW} height={Math.max(0, botAbs - topAbs)} fill={C.tolera} />
+      <rect x={barX} y={topOpt} width={barW} height={Math.max(0, botOpt - topOpt)} fill={C.ideal} />
 
       {ticks.map((t) => (
         <g key={t}>
-          <line x1={x(t)} x2={x(t)} y1={yB + alto} y2={yB + alto + 5} stroke={C.suave} />
-          <text x={x(t)} y={yB + alto + 17} textAnchor="middle" fontSize={11} fill={C.suave}>
-            {formatear(t, 1)}
+          <line x1={barX - 5} x2={barX} y1={y(t)} y2={y(t)} stroke={C.suave} />
+          <text x={barX - 8} y={y(t) + 4} textAnchor="end" fontSize={11} fill={C.suave}>
+            {formatear(t, dec)}
           </text>
         </g>
       ))}
 
-      <line x1={x(ph.p5)} x2={x(ph.p95)} y1={yB + alto / 2} y2={yB + alto / 2} stroke={color} strokeWidth={4} strokeOpacity={0.55} strokeLinecap="round">
-        <title>{`Incertidumbre del modelo: ${formatear(ph.p5, 1)} a ${formatear(ph.p95, 1)}`}</title>
+      {rango.max !== null && (
+        <g>
+          <line x1={barX - 4} x2={barX + barW + 4} y1={rec(rango.max)} y2={rec(rango.max)} stroke={C.no} strokeDasharray="5 4" />
+          <text x={barX + barW + 8} y={rec(rango.max) + 4} fontSize={11} fill={C.no}>
+            máx. {formatear(rango.max, dec)}
+          </text>
+        </g>
+      )}
+      {rango.min !== null && (
+        <g>
+          <line x1={barX - 4} x2={barX + barW + 4} y1={rec(rango.min)} y2={rec(rango.min)} stroke={C.no} strokeDasharray="5 4" />
+          <text x={barX + barW + 8} y={rec(rango.min) + 4} fontSize={11} fill={C.no}>
+            mín. {formatear(rango.min, dec)}
+          </text>
+        </g>
+      )}
+
+      <line x1={cx} x2={cx} y1={y(alto)} y2={y(bajo)} stroke={color} strokeWidth={5} strokeOpacity={0.55} strokeLinecap="round">
+        <title>{tooltipRango}</title>
       </line>
-      <circle cx={x(ph.media)} cy={yB + alto / 2} r={9} fill={color} stroke="#fff" strokeWidth={3}>
-        <title>{`pH estimado: ${formatear(ph.media, 1)}`}</title>
+      <circle cx={cx} cy={y(valor)} r={9} fill={color} stroke="#fff" strokeWidth={3}>
+        <title>{tooltipValor}</title>
       </circle>
-      <text x={x(ph.media)} y={yB - 16} textAnchor="middle" fontSize={15} fontWeight={700} fill={color}>
-        pH {formatear(ph.media, 1)}
-      </text>
-    </svg>
-  );
-}
-
-/* ---------------- Gráfica de lluvia: total del ciclo en cada año pasado ---------------- */
-
-function GraficaLluvia({ datos, rango }: { datos: LluviaCiclo[]; rango: Rango }) {
-  const W = 640;
-  const H = 230;
-  const M = { izq: 52, der: 14, arr: 14, abajo: 28 };
-
-  const tope = Math.max(...datos.map((d) => d.total), rango.max ?? 0, rango.optMax ?? 0) * 1.1 || 1;
-  const ancho = W - M.izq - M.der;
-  const alt = H - M.arr - M.abajo;
-  const y = (v: number) => M.arr + alt - (Math.min(Math.max(v, 0), tope) / tope) * alt;
-  const bw = ancho / datos.length;
-
-  const banda = (a: number | null, b: number | null, fill: string) => {
-    const arriba = y(b ?? tope);
-    const abajo = y(a ?? 0);
-    return <rect x={M.izq} y={arriba} width={ancho} height={Math.max(0, abajo - arriba)} fill={fill} />;
-  };
-
-  const paso = Math.max(1, Math.ceil(datos.length / 7));
-
-  return (
-    <svg
-      viewBox={`0 0 ${W} ${H}`}
-      role="img"
-      aria-label="Lluvia acumulada durante el ciclo en cada año pasado, frente al rango que tolera el cultivo"
-      style={{ width: "100%", height: "auto", display: "block" }}
-    >
-      {banda(rango.min, rango.max, C.tolera)}
-      {banda(rango.optMin, rango.optMax, C.ideal)}
-
-      {ticksBonitos(0, tope, 4).map((t) => (
-        <g key={t}>
-          <line x1={M.izq} x2={M.izq + ancho} y1={y(t)} y2={y(t)} stroke={C.linea} strokeWidth={1} />
-          <text x={M.izq - 8} y={y(t) + 4} textAnchor="end" fontSize={11} fill={C.suave}>
-            {formatear(t)}
-          </text>
-        </g>
-      ))}
-
-      {datos.map((d, i) => (
-        <g key={d.anioSiembra}>
-          <rect
-            x={M.izq + i * bw + 2}
-            width={Math.max(2, bw - 4)}
-            y={y(d.total)}
-            height={Math.max(0, M.arr + alt - y(d.total))}
-            fill={COLOR_CLASE[clasificarRango(d.total, rango)]}
-            fillOpacity={0.8}
-          >
-            <title>{`Siembra ${d.anioSiembra}: ${formatear(d.total)} mm en el ciclo`}</title>
-          </rect>
-          {i % paso === 0 && (
-            <text x={M.izq + i * bw + bw / 2} y={H - 8} textAnchor="middle" fontSize={11} fill={C.suave}>
-              {d.anioSiembra}
-            </text>
-          )}
-        </g>
-      ))}
     </svg>
   );
 }
@@ -846,129 +959,13 @@ function Mapa({ ubicacion, onElegir }: { ubicacion: Ubicacion; onElegir: (u: Ubi
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
-/* ---------------- Estilos ---------------- */
-
-const CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,800&family=Figtree:wght@400;500;600&display=swap');
-
-.cm{
-  --fondo:#f2f4ee; --papel:#ffffff; --tinta:${C.tinta}; --suave:${C.suave}; --linea:${C.linea};
-  --verde:#1f6b43; --si:${C.si}; --cuidado:${C.cuidado}; --no:${C.no}; --sin:${C.sin};
-  background:var(--fondo); color:var(--tinta); min-height:100vh; padding:16px 16px 56px;
-  font-family:'Figtree',system-ui,-apple-system,'Segoe UI',sans-serif; line-height:1.45; font-size:15px;
-}
-.cm *{box-sizing:border-box}
-.cm-wrap{max-width:1180px;margin:0 auto}
-
-.cm-cab{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
-.cm h1{
-  font-family:'Bricolage Grotesque','Figtree',system-ui,sans-serif;font-weight:800;
-  font-size:clamp(26px,4.5vw,36px);line-height:1.05;letter-spacing:-0.02em;margin:0;
-}
-.cm-top{display:flex;gap:14px;align-items:center;font-size:14px;color:var(--suave)}
-.cm-top a{color:var(--verde);font-weight:600;text-decoration:none}
-.cm-top a:hover{text-decoration:underline}
-.cm-sub{color:var(--suave);margin:4px 0 0}
-
-.cm-card{background:var(--papel);border:1px solid var(--linea);border-radius:14px;padding:14px}
-.cm-etiqueta{display:block;font-size:13px;font-weight:600;color:var(--suave);margin-bottom:6px}
-.cm select,.cm input[type=text]{
-  width:100%;font:inherit;color:var(--tinta);background:#fff;border:1px solid #c9d1c5;border-radius:10px;padding:9px 12px;min-height:42px;
-}
-.cm select:focus-visible,.cm input:focus-visible,.cm button:focus-visible{outline:3px solid #8ec5a2;outline-offset:2px}
-
-/* fila principal: qué y cuándo · dónde · conviene */
-.cm-fila{display:grid;gap:12px;margin-top:14px}
-@media(min-width:960px){
-  .cm-fila{grid-template-columns:minmax(240px,1fr) minmax(300px,1.3fr) minmax(280px,1.15fr);align-items:stretch}
-}
-
-.cm-meses{display:grid;grid-template-columns:repeat(6,1fr);gap:6px}
-.cm-mes{
-  font:inherit;font-size:13px;display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 0 6px;
-  background:#fff;border:1px solid var(--linea);border-radius:9px;cursor:pointer;color:var(--tinta);min-height:48px;
-}
-.cm-mes:hover{border-color:#9fb3a6}
-.cm-mes[aria-pressed=true]{border:2px solid var(--tinta);padding:7px 0 5px;font-weight:600}
-.cm-punto{width:11px;height:11px;border-radius:50%;background:var(--sin)}
-.cm-nota{margin:8px 0 0;color:var(--suave);font-size:13px}
-
-.cm-ubi-cab{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px}
-.cm-ubi-cab .cm-etiqueta{margin:0}
-.cm-ubi-nombre{font-weight:600;font-size:14px}
-.cm-ubi-coord{font-size:12px;color:var(--suave)}
-.cm-buscador{position:relative;z-index:5}
-.cm-sug{
-  position:absolute;left:0;right:0;top:calc(100% + 4px);list-style:none;margin:0;padding:4px;
-  background:#fff;border:1px solid #c9d1c5;border-radius:10px;box-shadow:0 8px 24px rgba(28,42,33,.14);
-}
-.cm-sug button{width:100%;text-align:left;font:inherit;background:none;border:0;padding:9px 10px;border-radius:8px;cursor:pointer;min-height:42px}
-.cm-sug button:hover{background:#eef5f0}
-.cm-sug-info{padding:10px;color:var(--suave);font-size:14px}
-.cm-mapa{flex:1;min-height:190px;height:210px;margin-top:8px;border-radius:12px;overflow:hidden;isolation:isolate;z-index:0;border:1px solid var(--linea);cursor:crosshair;background:#e9ede8}
-.cm-mapa-error{display:flex;align-items:center;justify-content:center;padding:16px;text-align:center;cursor:default}
-.cm-mapa-pie{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px}
-.cm-mapa-pie p{margin:0;color:var(--suave);font-size:13px}
-.cm-boton{font:inherit;font-weight:600;min-height:40px;padding:0 14px;border-radius:10px;border:0;background:var(--verde);color:#fff;cursor:pointer}
-.cm-boton.sec{background:#fff;color:var(--verde);border:1px solid #b9c9be}
-.cm-boton:disabled{opacity:.6;cursor:default}
-.cm-error{margin:0;color:var(--no);font-size:14px}
-
-/* veredicto */
-.cm-ver{border-radius:14px;padding:16px;border:1px solid transparent;border-left:8px solid var(--sin);background:#e9ede8;display:flex;flex-direction:column;gap:8px}
-.cm-ver.si{background:#dcefe2;border-left-color:var(--si)}
-.cm-ver.cuidado{background:#f7ebc6;border-left-color:var(--cuidado)}
-.cm-ver.no{background:#f6dad4;border-left-color:var(--no)}
-.cm-ver h2{font-family:'Bricolage Grotesque','Figtree',sans-serif;font-weight:800;font-size:clamp(20px,2.6vw,25px);line-height:1.12;letter-spacing:-0.015em;margin:0}
-.cm-ver.si h2{color:#134a2e}.cm-ver.cuidado h2{color:#6d4900}.cm-ver.no h2{color:#7c2216}
-.cm-ver p{margin:0}
-.cm-ver .cm-fino{font-size:13px;color:#3d4a41}
-.cm-factores{list-style:none;margin:2px 0 0;padding:0;display:grid;gap:6px}
-.cm-factor{
-  width:100%;text-align:left;font:inherit;font-size:14px;display:flex;align-items:center;gap:8px;
-  background:rgba(255,255,255,.65);border:1px solid rgba(28,42,33,.12);border-radius:9px;padding:7px 10px;color:var(--tinta);min-height:40px;
-}
-.cm-factor b{font-weight:600}
-.cm-factor .cm-punto{flex:none}
-
-/* panel de gráficas: pH a la izquierda, temperatura a la derecha, lluvia abajo */
-.cm-graf{margin-top:12px}
-.cm-graf-cuerpo{display:grid;gap:20px;grid-template-columns:1fr}
-@media(min-width:960px){.cm-graf-cuerpo{grid-template-columns:1fr 1.8fr;align-items:start}}
-.cm-h3{font-family:'Bricolage Grotesque','Figtree',sans-serif;font-size:16px;font-weight:800;margin:0 0 4px}
-.cm-rango{font-size:12.5px;color:var(--suave);margin:0 0 10px}
-.cm-leyenda{display:flex;flex-wrap:wrap;gap:4px 16px;list-style:none;margin:8px 0 0;padding:0;font-size:12.5px;color:var(--suave)}
-.cm-leyenda li{display:flex;align-items:center;gap:6px}
-.cm-muestra{width:16px;height:11px;border-radius:3px;display:inline-block}
-
-.cm-mesgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:8px;margin-top:12px}
-.cm-mescard{border:1px solid var(--linea);border-radius:10px;padding:8px 10px;border-top:4px solid var(--sin);background:#fff}
-.cm-mescard b{display:block;font-weight:600;font-size:14px}
-.cm-mescard .t{font-size:20px;font-family:'Bricolage Grotesque','Figtree',sans-serif;font-weight:800;line-height:1.2}
-.cm-mescard .e{font-size:12.5px;font-weight:600}
-.cm-mescard .a{font-size:12px;color:var(--suave)}
-
-.cm-chico{font-size:12.5px;color:var(--suave);margin:8px 0 0}
-.cm-dato-grande{font-family:'Bricolage Grotesque','Figtree',sans-serif;font-weight:800;font-size:28px;line-height:1.1;margin:10px 0 0}
-.cm-vacio{color:var(--suave);padding:10px 0;margin:0}
-.cm-lluvia{margin-top:22px;padding-top:16px;border-top:1px solid var(--linea)}
-
-.cm-det{margin-top:18px;border-top:1px solid var(--linea);padding-top:12px;font-size:13.5px;color:var(--suave)}
-.cm-det summary{cursor:pointer;font-weight:600;color:var(--tinta)}
-.cm-det p{margin:8px 0 0;max-width:90ch}
-.cm-cargando{color:var(--suave);padding:14px 0}
-
-/* Leaflet (cargado por CDN): evitar que los estilos globales deformen el mapa */
-.cm .leaflet-container{font:inherit;width:100%;height:100%}
-.cm .leaflet-container a{color:#1f6b43}
-`;
-
 /* ---------------- Página ---------------- */
 
 export default function AnalyzeMyCropsPage() {
   const [ubicacion, setUbicacion] = useState<Ubicacion>(UBICACION_INICIAL);
   const [intento, setIntento] = useState(0);
-  const [resultado, setResultado] = useState<Resultado | null>(null);
+  const [resultado, setResultado] = useState<Resultado | null>(null); // NASA POWER
+  const [eraRes, setEraRes] = useState<Extra<DatosEra> | null>(null); // ERA5
   const [phRes, setPhRes] = useState<Extra<PhSuelo> | null>(null);
   const [buscandoGps, setBuscandoGps] = useState(false);
   const [errorGps, setErrorGps] = useState<string | null>(null);
@@ -983,7 +980,7 @@ export default function AnalyzeMyCropsPage() {
   const clave = `${ubicacion.lat},${ubicacion.lon},${anioInicio},${anioFin},${intento}`;
   const claveExtra = `${ubicacion.lat},${ubicacion.lon},${intento}`;
 
-  // Clima: NASA POWER (temperatura media y lluvia mensual)
+  // Temperatura media mensual: NASA POWER
   useEffect(() => {
     const controlador = new AbortController();
     pedirDatosPower(ubicacion, anioInicio, anioFin, controlador.signal)
@@ -994,6 +991,22 @@ export default function AnalyzeMyCropsPage() {
           clave,
           datos: null,
           error: e instanceof Error ? e.message : "Error desconocido",
+        });
+      });
+    return () => controlador.abort();
+  }, [clave, ubicacion, anioInicio, anioFin]);
+
+  // Lluvia, ET0 y mínima diaria: ERA5 vía Open-Meteo
+  useEffect(() => {
+    const controlador = new AbortController();
+    pedirDatosEra(ubicacion, anioInicio, anioFin, controlador.signal)
+      .then((datos) => setEraRes({ clave, valor: datos, error: null }))
+      .catch((e: unknown) => {
+        if (e instanceof DOMException && e.name === "AbortError") return;
+        setEraRes({
+          clave,
+          valor: null,
+          error: e instanceof Error ? e.message : "Error desconocido al pedir ERA5",
         });
       });
     return () => controlador.abort();
@@ -1062,6 +1075,8 @@ export default function AnalyzeMyCropsPage() {
 
   const actual = resultado && resultado.clave === clave ? resultado : null;
   const datosPower = actual?.datos ?? null;
+  const eraActual = eraRes && eraRes.clave === clave ? eraRes : null;
+  const datosEra = eraActual?.valor ?? null;
   const phActual = phRes && phRes.clave === claveExtra ? phRes : null;
 
   const cultivo = eco?.cultivos[cultivoNombre] ?? null;
@@ -1074,22 +1089,38 @@ export default function AnalyzeMyCropsPage() {
   const phValor = phActual?.valor ?? null;
   const vPh: Veredicto = rangoPh && phValor ? VER_DE_CLASE[clasificarRango(phValor.media, rangoPh)] : "sin";
 
-  const rangoLluvia = cultivo && tieneRango(cultivo.precipitacion) ? cultivo.precipitacion : null;
+  // Lluvia: el rango de EcoCrop es para el ciclo, así que depende del mes de siembra
+  const rangoLluvia = cultivo && tieneRango(cultivo.lluviaAnual) ? cultivo.lluviaAnual : null;
 
-  // Temperatura y lluvia: un análisis por cada uno de los 12 meses posibles de siembra
+  // Un análisis por cada uno de los 12 meses posibles de siembra:
+  // temperatura (POWER) y lluvia + ET0 (ERA5), cada uno con su propia fuente.
   const porMesSiembra = useMemo(() => {
-    if (!datosPower || !cultivo || !dias) return [];
+    if (!cultivo || !dias || (!datosPower && !datosEra)) return [];
     return Array.from({ length: 12 }, (_, i) => {
       const mes = i + 1;
-      const a = analizar(curvasMensuales(datosPower, mes, nMeses, anios), cultivo.temperatura, nMeses);
-      const lluvia = lluviaPorCiclo(datosPower, mes, nMeses, anios);
-      const vL: Veredicto = rangoLluvia ? veredictoLluvia(lluvia.map((l) => l.total), rangoLluvia) : "sin";
-      return { mes, a, lluvia, vT: veredictoTemperatura(a, cultivo.temperatura), vL };
+      const a = datosPower
+        ? analizar(curvasMensuales(datosPower, mes, nMeses, anios), cultivo.temperatura, nMeses)
+        : null;
+      const rain =
+        datosEra && rangoLluvia
+          ? resumirLluvia(ciclosEra(datosEra, "lluvia", mes, nMeses, anios), rangoLluvia, nMeses)
+          : null;
+      const et0 = datosEra ? et0DelCiclo(ciclosEra(datosEra, "et0", mes, nMeses, anios)) : null;
+      return {
+        mes,
+        a,
+        rain,
+        et0,
+        vT: veredictoTemperatura(a, cultivo.temperatura),
+        vL: rangoLluvia ? veredictoLluvia(rain, rangoLluvia) : ("sin" as Veredicto),
+      };
     });
-  }, [datosPower, cultivo, dias, nMeses, anios, rangoLluvia]);
+  }, [datosPower, datosEra, cultivo, dias, nMeses, anios, rangoLluvia]);
 
   const sel = porMesSiembra[mesSiembra - 1] ?? null;
   const vTemp: Veredicto = sel?.vT ?? "sin";
+  const resLluvia = sel?.rain ?? null;
+  const et0Ciclo = sel?.et0 ?? null;
   const vLluvia: Veredicto = sel?.vL ?? "sin";
   const global = combinar(vTemp, vPh, vLluvia);
   const nombresCiclo = Array.from({ length: nMeses }, (_, i) => MESES[(mesSiembra - 1 + i) % 12]);
@@ -1097,6 +1128,18 @@ export default function AnalyzeMyCropsPage() {
   const mejores = porMesSiembra
     .filter((m) => combinar(m.vT, vPh, m.vL) === "si")
     .map((m) => MESES[m.mes - 1]);
+
+  // Temperatura letal (opcional): mínima diaria más baja de cada ciclo (ERA5)
+  const tLetal = cultivo?.tLetal ?? null;
+  const heladas = useMemo(() => {
+    if (!datosEra || tLetal === null || !cultivo) return null;
+    const minimas = minimasDelCiclo(datosEra, mesSiembra, nMeses, anios);
+    if (minimas.length === 0) return null;
+    return { n: minimas.length, bajo: minimas.filter((m) => m < tLetal).length };
+  }, [datosEra, tLetal, cultivo, mesSiembra, nMeses, anios]);
+
+  // Cobertura de la ET0 por la lluvia (solo informativa)
+  const cobertura = resLluvia && et0Ciclo && et0Ciclo > 0 ? resLluvia.mediana / et0Ciclo : null;
 
   function explicacionTemperatura(): string {
     if (!sel || !sel.a || !cultivo) return "";
@@ -1115,46 +1158,61 @@ export default function AnalyzeMyCropsPage() {
   }
 
   function explicacionLluvia(): string {
-    if (!sel || !rangoLluvia) return "";
-    const tot = sel.lluvia.map((l) => l.total);
-    if (tot.length < MIN_ANIOS) {
-      return `Solo hay ${tot.length} años con lluvia completa para este ciclo; hacen falta al menos ${MIN_ANIOS} para opinar.`;
+    if (!resLluvia || !rangoLluvia) return "";
+    const r = rangoLluvia;
+    const med = resLluvia.mediana;
+    const medTxt = formatear(med);
+    const n = (v: number | null) => (v !== null ? formatear(v) : "?");
+    if (vLluvia === "sin") {
+      return `Solo hay ${resLluvia.n} años con lluvia completa para este ciclo; hacen falta al menos ${MIN_ANIOS} para opinar.`;
     }
-    const med = mediana(tot);
-    const bajos = rangoLluvia.min !== null ? tot.filter((t) => t < rangoLluvia.min!).length : 0;
-    const altos = rangoLluvia.max !== null ? tot.filter((t) => t > rangoLluvia.max!).length : 0;
-    const fuera = bajos + altos;
-    const rangoTxt = `${rangoLluvia.min !== null ? formatear(rangoLluvia.min) : "?"}–${
-      rangoLluvia.max !== null ? formatear(rangoLluvia.max) : "?"
-    } mm`;
-    if (fuera === 0) {
-      return `Durante el ciclo suelen caer unos ${formatear(med)} mm, dentro de lo que tolera el ${nombreC} (${rangoTxt}).`;
+    const bajaIdeal = r.optMin !== null && med < r.optMin;
+    const altaIdeal = r.optMax !== null && med > r.optMax;
+    if (vLluvia === "no") {
+      if (r.min !== null && med < r.min) {
+        return `Sembrando en ${MESES[mesSiembra - 1].toLowerCase()} llueven unos ${medTxt} mm durante el ciclo, menos de lo que tolera el ${nombreC} (mínimo ${n(r.min)} mm). Necesitaría riego.`;
+      }
+      if (r.max !== null && med > r.max) {
+        return `Sembrando en ${MESES[mesSiembra - 1].toLowerCase()} llueven unos ${medTxt} mm durante el ciclo, más de lo que tolera el ${nombreC} (máximo ${n(r.max)} mm).`;
+      }
+      return `En ${resLluvia.n - resLluvia.ok} de ${resLluvia.n} años la lluvia del ciclo quedó fuera de lo que tolera el ${nombreC} (${n(r.min)}–${n(r.max)} mm).`;
     }
-    return `Durante el ciclo suelen caer unos ${formatear(med)} mm. En ${fuera} de ${tot.length} años ${
-      bajos >= altos ? "llovió menos del mínimo (podría hacer falta riego)" : "llovió más del máximo"
-    } que tolera el ${nombreC} (${rangoTxt}).`;
+    if (bajaIdeal) {
+      return `Durante el ciclo llueven unos ${medTxt} mm: el ${nombreC} lo tolera, pero queda por debajo del ideal (${n(r.optMin)}–${n(r.optMax)} mm). Un riego de apoyo ayudaría.`;
+    }
+    if (altaIdeal) {
+      return `Durante el ciclo llueven unos ${medTxt} mm: el ${nombreC} lo tolera, pero queda por encima del ideal (${n(r.optMin)}–${n(r.optMax)} mm).`;
+    }
+    return `En ${resLluvia.n - resLluvia.ok} de ${resLluvia.n} años la lluvia del ciclo quedó fuera de lo que tolera el ${nombreC} (${n(r.min)}–${n(r.max)} mm).`;
+  }
+
+  function explicacionPh(): string {
+    if (!phValor || !rangoPh) return "";
+    return vPh === "no"
+      ? `El pH del suelo en este punto (${formatear(phValor.media, 1)}) está fuera de lo que tolera el ${nombreC} (${rangoPh.min ?? "?"}–${rangoPh.max ?? "?"}).`
+      : `El pH del suelo en este punto (${formatear(phValor.media, 1)}) tolera, pero no es el ideal del ${nombreC} (${rangoPh.optMin ?? "?"}–${rangoPh.optMax ?? "?"}).`;
   }
 
   function explicacion(): string {
     if (!cultivo) return "";
     if (global === "si") {
       const partes = ["la temperatura"];
-      if (rangoLluvia && vLluvia !== "sin") partes.push("la lluvia");
-      if (phValor) partes.push("el pH del suelo");
-      return `${partes.join(", ").replace(/, ([^,]*)$/, " y $1")} están dentro de lo que tolera el cultivo.`.replace(/^./, (c) => c.toUpperCase());
+      if (vLluvia !== "sin") partes.push("la lluvia del ciclo");
+      if (vPh !== "sin") partes.push("el pH del suelo");
+      const lista =
+        partes.length === 1 ? partes[0] : `${partes.slice(0, -1).join(", ")} y ${partes[partes.length - 1]}`;
+      const base = `${lista.charAt(0).toUpperCase()}${lista.slice(1)} ${
+        partes.length === 1 ? "está" : "están"
+      } dentro de lo que tolera el cultivo.`;
+      return vPh === "sin" ? `${base} (El pH del suelo todavía no se pudo evaluar.)` : base;
     }
     const gT = GRAV[vTemp];
     const gP = GRAV[vPh];
     const gL = GRAV[vLluvia];
-    if (gP > gT && gP >= gL && phValor && rangoPh) {
-      return vPh === "no"
-        ? `El pH del suelo en este punto (${formatear(phValor.media, 1)}) está fuera de lo que tolera el ${nombreC} (${rangoPh.min ?? "?"}–${rangoPh.max ?? "?"}).`
-        : `El pH del suelo en este punto (${formatear(phValor.media, 1)}) tolera, pero no es el ideal del ${nombreC} (${rangoPh.optMin ?? "?"}–${rangoPh.optMax ?? "?"}).`;
-    }
-    if (gL > gT && gL > gP && rangoLluvia) {
-      return explicacionLluvia();
-    }
-    return explicacionTemperatura();
+    const peorG = Math.max(gT, gP, gL);
+    if (gT === peorG) return explicacionTemperatura();
+    if (gP === peorG) return explicacionPh();
+    return explicacionLluvia();
   }
 
   const TITULO: Record<Veredicto, string> = {
@@ -1177,25 +1235,31 @@ export default function AnalyzeMyCropsPage() {
       }`;
   const textoLluvia = !rangoLluvia
     ? "sin rango para este cultivo"
-    : !datosPower
-    ? "consultando…"
-    : !sel || sel.lluvia.length === 0
+    : !datosEra
+    ? eraActual?.error
+      ? "sin dato"
+      : "consultando…"
+    : !resLluvia
     ? "sin datos"
-    : `${formatear(mediana(sel.lluvia.map((l) => l.total)))} mm típicos · ${
-        vLluvia === "si" ? "adecuada" : vLluvia === "cuidado" ? "con cuidado" : vLluvia === "no" ? "fuera de rango" : "sin datos suficientes"
+    : `${formatear(resLluvia.mediana)} mm en el ciclo · ${
+        vLluvia === "si"
+          ? "ideal"
+          : vLluvia === "cuidado"
+          ? "tolerable"
+          : vLluvia === "no"
+          ? "fuera de rango"
+          : "pocos años"
       }`;
 
   return (
     <main className="cm">
-      <style>{CSS}</style>
       <div className="cm-wrap">
-        <div className="cm-cab">
-          <h1>¿Conviene sembrar?</h1>
-          <div className="cm-top">
-            <Link href="/">← Inicio</Link>
-            <span>03 / 05</span>
-          </div>
-        </div>
+        <header className="cm-cab">
+          <Link href="/">← Inicio</Link>
+          <span className="cm-sutil">03 / 05</span>
+        </header>
+        <span className="cm-kicker">Analizar mis cultivos</span>
+        <h1>¿Conviene sembrar?</h1>
         <p className="cm-sub">
           Elegí cultivo, mes y lugar. Mirá cómo le habría ido en los últimos {ANIOS_ATRAS} años.
         </p>
@@ -1229,7 +1293,8 @@ export default function AnalyzeMyCropsPage() {
             <div className="cm-meses">
               {MESES.map((nombre, i) => {
                 const mes = i + 1;
-                const v = porMesSiembra[i] ? combinar(porMesSiembra[i].vT, vPh, porMesSiembra[i].vL) : "sin";
+                const p = porMesSiembra[i];
+                const v = p ? combinar(p.vT, vPh, p.vL) : "sin";
                 return (
                   <button
                     key={nombre}
@@ -1293,35 +1358,50 @@ export default function AnalyzeMyCropsPage() {
                 <p>{explicacion()}</p>
 
                 <ul className="cm-factores">
-                  <li>
-                    <div className="cm-factor">
-                      <span className="cm-punto" style={{ background: COLOR_VEREDICTO[vTemp] }} />
-                      <span>
-                        <b>Temperatura</b> · {textoTemp}
-                      </span>
-                    </div>
+                  <li className="cm-factor">
+                    <span className="cm-punto" style={{ background: COLOR_VEREDICTO[vTemp] }} />
+                    <span>
+                      <b>Temperatura</b> · {textoTemp}
+                    </span>
                   </li>
-                  <li>
-                    <div className="cm-factor">
-                      <span className="cm-punto" style={{ background: COLOR_VEREDICTO[vLluvia] }} />
-                      <span>
-                        <b>Lluvia</b> · {textoLluvia}
-                      </span>
-                    </div>
+                  <li className="cm-factor">
+                    <span className="cm-punto" style={{ background: COLOR_VEREDICTO[vLluvia] }} />
+                    <span>
+                      <b>Lluvia del ciclo</b> · {textoLluvia}
+                    </span>
                   </li>
-                  <li>
-                    <div className="cm-factor">
-                      <span className="cm-punto" style={{ background: COLOR_VEREDICTO[vPh] }} />
-                      <span>
-                        <b>pH del suelo</b> · {textoPh}
-                      </span>
-                    </div>
+                  <li className="cm-factor">
+                    <span className="cm-punto" style={{ background: COLOR_VEREDICTO[vPh] }} />
+                    <span>
+                      <b>pH del suelo</b> · {textoPh}
+                    </span>
                   </li>
                 </ul>
 
                 {global !== "si" && mejores.length > 0 && (
                   <p>
                     <strong>Meses que mejor le irían:</strong> {mejores.join(", ")}.
+                  </p>
+                )}
+                {eraActual?.error && (
+                  <p className="cm-error">No se pudo cargar la lluvia (ERA5): {eraActual.error}</p>
+                )}
+                {resLluvia && resLluvia.secos > 0 && (
+                  <p className="cm-fino">
+                    Aviso: en el año típico, {resLluvia.secos} {resLluvia.secos === 1 ? "mes" : "meses"} del ciclo
+                    tienen menos de {MES_SECO_MM} mm de lluvia.
+                  </p>
+                )}
+                {cobertura !== null && cobertura < RATIO_ET0_AVISO && (
+                  <p className="cm-fino">
+                    Aviso: la lluvia del ciclo cubre cerca del {formatear(cobertura * 100)} % de la evaporación
+                    potencial (ET0). Puede hacer falta riego.
+                  </p>
+                )}
+                {heladas && heladas.bajo > 0 && tLetal !== null && (
+                  <p className="cm-fino">
+                    Aviso: en {heladas.bajo} de {heladas.n} años la temperatura mínima diaria bajó de{" "}
+                    {formatear(tLetal)} °C (temperatura letal) durante el ciclo.
                   </p>
                 )}
                 <p className="cm-fino">
@@ -1335,73 +1415,146 @@ export default function AnalyzeMyCropsPage() {
         {errorEco && <p className="cm-error" style={{ marginTop: 12 }}>{errorEco}</p>}
         {!eco && !errorEco && <p className="cm-cargando">Cargando rangos de cultivos…</p>}
 
-        {/* ---------- Gráficas: pH a la izquierda, temperatura a la derecha, lluvia abajo ---------- */}
+        {/* ---------- Gráficas: pH y lluvia a la izquierda, temperatura a la derecha ---------- */}
         {cultivo && (
           <section className="cm-card cm-graf">
             <div className="cm-graf-cuerpo">
-              {/* Izquierda: pH */}
+              {/* Izquierda: dos medidores verticales */}
               <div>
-                <h3 className="cm-h3">pH del suelo</h3>
-                {rangoPh && (
-                  <p className="cm-rango">
-                    Ideal: {rangoPh.optMin ?? "?"}–{rangoPh.optMax ?? "?"} · Tolera: {rangoPh.min ?? "?"}–{rangoPh.max ?? "?"}
-                  </p>
-                )}
-                {!rangoPh && (
-                  <p className="cm-vacio">
-                    La copia local de EcoCrop no trae rango de pH para este cultivo, así que no se puede comparar.
-                  </p>
-                )}
-                {rangoPh && !phActual && (
-                  <p className="cm-vacio">Consultando SoilGrids… (a veces tarda unos segundos).</p>
-                )}
-                {rangoPh && phActual?.error && (
-                  <div>
-                    <p className="cm-error">{phActual.error}</p>
-                    <p className="cm-chico">
-                      <button type="button" className="cm-boton sec" onClick={() => setIntento((n) => n + 1)}>
-                        Reintentar
-                      </button>
-                    </p>
+                <div className="cm-lugar">
+                  <div className="cm-vert">
+                    <h3 className="cm-h3">pH del suelo</h3>
+                    {rangoPh && (
+                      <p className="cm-rango">
+                        Ideal {rangoPh.optMin ?? "?"}–{rangoPh.optMax ?? "?"} · Tolera {rangoPh.min ?? "?"}–{rangoPh.max ?? "?"}
+                      </p>
+                    )}
+                    {!rangoPh && (
+                      <p className="cm-vacio">EcoCrop no trae rango de pH para este cultivo.</p>
+                    )}
+                    {rangoPh && !phActual && <p className="cm-vacio">Consultando SoilGrids…</p>}
+                    {rangoPh && phActual?.error && (
+                      <div>
+                        <p className="cm-error">{phActual.error}</p>
+                        <p style={{ marginTop: 8 }}>
+                          <button type="button" className="cm-boton sec" onClick={() => setIntento((n) => n + 1)}>
+                            Reintentar
+                          </button>
+                        </p>
+                      </div>
+                    )}
+                    {rangoPh && phValor && (
+                      <>
+                        <MedidorVertical
+                          valor={phValor.media}
+                          bajo={phValor.p5}
+                          alto={phValor.p95}
+                          rango={rangoPh}
+                          dec={1}
+                          aria={`pH del suelo ${phValor.media} frente al rango que tolera el cultivo`}
+                          tooltipValor={`pH estimado: ${formatear(phValor.media, 1)}`}
+                          tooltipRango={`Incertidumbre del modelo: ${formatear(phValor.p5, 1)} a ${formatear(phValor.p95, 1)}`}
+                        />
+                        <p className="cm-dato-grande" style={{ color: COLOR_VEREDICTO[vPh] }}>
+                          pH {formatear(phValor.media, 1)}
+                        </p>
+                        <p className="cm-chico">
+                          El modelo estima entre {formatear(phValor.p5, 1)} y {formatear(phValor.p95, 1)} (0–30 cm).
+                          Es una estimación satelital: un análisis de suelo es más confiable.
+                        </p>
+                      </>
+                    )}
                   </div>
-                )}
-                {rangoPh && phValor && (
-                  <>
-                    <GraficaPh ph={phValor} rango={rangoPh} />
-                    <ul className="cm-leyenda">
-                      <li>
-                        <span className="cm-muestra" style={{ background: C.ideal }} /> Ideal
-                      </li>
-                      <li>
-                        <span className="cm-muestra" style={{ background: C.tolera }} /> Lo que tolera
-                      </li>
-                      <li>
-                        <span className="cm-muestra" style={{ background: C.suave, height: 3 }} /> Incertidumbre del
-                        modelo
-                      </li>
-                    </ul>
-                    <p className="cm-dato-grande" style={{ color: COLOR_VEREDICTO[vPh] }}>
-                      pH {formatear(phValor.media, 1)}
-                    </p>
-                    <p style={{ margin: "4px 0 0" }}>
-                      {vPh === "si" && `Está dentro del rango ideal del ${nombreC}.`}
-                      {vPh === "cuidado" && `El ${nombreC} lo tolera, pero no es el ideal.`}
-                      {vPh === "no" && `Queda fuera de lo que tolera el ${nombreC}.`}
-                    </p>
-                    <p className="cm-chico">
-                      El modelo estima entre {formatear(phValor.p5, 1)} y {formatear(phValor.p95, 1)}. Es un promedio de
-                      0 a 30 cm de profundidad, calculado por satélite y modelos (SoilGrids), no un análisis de tu
-                      terreno. Un análisis de suelo es más confiable. Este valor es el mismo para todos los meses.
-                    </p>
-                  </>
-                )}
+
+                  <div className="cm-vert">
+                    <h3 className="cm-h3">Lluvia del ciclo</h3>
+                    {rangoLluvia && (
+                      <p className="cm-rango">
+                        Ideal {rangoLluvia.optMin !== null ? formatear(rangoLluvia.optMin) : "?"}–
+                        {rangoLluvia.optMax !== null ? formatear(rangoLluvia.optMax) : "?"} · Tolera{" "}
+                        {rangoLluvia.min !== null ? formatear(rangoLluvia.min) : "?"}–
+                        {rangoLluvia.max !== null ? formatear(rangoLluvia.max) : "?"} mm
+                      </p>
+                    )}
+                    {!rangoLluvia && (
+                      <p className="cm-vacio">EcoCrop no trae rango de lluvia para este cultivo.</p>
+                    )}
+                    {rangoLluvia && !datosEra && !eraActual?.error && (
+                      <p className="cm-vacio">Consultando ERA5…</p>
+                    )}
+                    {rangoLluvia && eraActual?.error && (
+                      <div>
+                        <p className="cm-error">{eraActual.error}</p>
+                        <p style={{ marginTop: 8 }}>
+                          <button type="button" className="cm-boton sec" onClick={() => setIntento((n) => n + 1)}>
+                            Reintentar
+                          </button>
+                        </p>
+                      </div>
+                    )}
+                    {rangoLluvia && datosEra && !resLluvia && (
+                      <p className="cm-vacio">No hay ciclos completos con datos de lluvia para este mes.</p>
+                    )}
+                    {rangoLluvia && resLluvia && (
+                      <>
+                        <MedidorVertical
+                          valor={resLluvia.mediana}
+                          bajo={resLluvia.p10}
+                          alto={resLluvia.p90}
+                          rango={rangoLluvia}
+                          dec={0}
+                          desdeCero
+                          aria={`Lluvia típica del ciclo de ${formatear(resLluvia.mediana)} mm frente al rango que tolera el cultivo`}
+                          tooltipValor={`Lluvia típica del ciclo: ${formatear(resLluvia.mediana)} mm`}
+                          tooltipRango={`Años típicos: ${formatear(resLluvia.p10)} a ${formatear(resLluvia.p90)} mm`}
+                        />
+                        <p
+                          className="cm-dato-grande"
+                          style={{ color: COLOR_VEREDICTO[vLluvia] }}
+                        >
+                          {formatear(resLluvia.mediana)} mm
+                        </p>
+                        <p className="cm-chico">
+                          Total de {nMeses} {nMeses === 1 ? "mes" : "meses"} desde {MESES[mesSiembra - 1].toLowerCase()}.
+                          Mediana de {resLluvia.n} años; la mayoría cae entre {formatear(resLluvia.p10)} y{" "}
+                          {formatear(resLluvia.p90)} mm.
+                          {resLluvia.secos > 0 &&
+                            ` ${resLluvia.secos} ${resLluvia.secos === 1 ? "mes" : "meses"} del ciclo con menos de ${MES_SECO_MM} mm.`}
+                        </p>
+                        {et0Ciclo !== null && (
+                          <p className="cm-chico">
+                            Evaporación potencial (ET0) del ciclo: {formatear(et0Ciclo)} mm
+                            {cobertura !== null && ` · la lluvia cubre cerca del ${formatear(cobertura * 100)} %`}. Es
+                            solo un dato: no cambia el resultado.
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <ul className="cm-leyenda">
+                  <li>
+                    <span className="cm-muestra" style={{ background: C.ideal }} /> Ideal
+                  </li>
+                  <li>
+                    <span className="cm-muestra" style={{ background: C.tolera }} /> Lo que tolera
+                  </li>
+                  <li>
+                    <span className="cm-muestra" style={{ background: C.suave, height: 3 }} /> Rango del dato
+                  </li>
+                </ul>
+                <p className="cm-chico">
+                  El pH es del lugar y no cambia con el mes. La lluvia sí cambia: se suma durante el ciclo desde el mes
+                  de siembra elegido.
+                </p>
               </div>
 
               {/* Derecha: temperatura */}
               <div>
-                <h3 className="cm-h3">Temperatura</h3>
+                <h3 className="cm-h3">Temperatura durante el ciclo</h3>
                 <p className="cm-rango">
-                  Ideal: {cultivo.temperatura.optMin ?? "?"}–{cultivo.temperatura.optMax ?? "?"} °C · Tolera:{" "}
+                  Ideal {cultivo.temperatura.optMin ?? "?"}–{cultivo.temperatura.optMax ?? "?"} °C · Tolera{" "}
                   {cultivo.temperatura.min ?? "?"}–{cultivo.temperatura.max ?? "?"} °C
                 </p>
                 {!datosPower && !actual?.error && <p className="cm-vacio">Consultando el clima de los últimos años…</p>}
@@ -1423,8 +1576,8 @@ export default function AnalyzeMyCropsPage() {
                         <span className="cm-muestra" style={{ background: C.tolera }} /> Lo que tolera
                       </li>
                       <li>
-                        <span className="cm-muestra" style={{ background: "rgba(47,93,124,.4)", height: 3 }} /> Cada año
-                        pasado
+                        <span className="cm-muestra" style={{ background: "rgba(57,125,164,.45)", height: 3 }} /> Cada
+                        año pasado
                       </li>
                       <li>
                         <span className="cm-muestra" style={{ background: C.tinta, height: 3 }} /> Año típico
@@ -1451,53 +1604,6 @@ export default function AnalyzeMyCropsPage() {
                 )}
               </div>
             </div>
-
-            {/* Abajo: lluvia */}
-            <div className="cm-lluvia">
-              <h3 className="cm-h3">Lluvia acumulada del ciclo</h3>
-              {rangoLluvia && (
-                <p className="cm-rango">
-                  Ideal: {rangoLluvia.optMin !== null ? formatear(rangoLluvia.optMin) : "?"}–
-                  {rangoLluvia.optMax !== null ? formatear(rangoLluvia.optMax) : "?"} mm · Tolera:{" "}
-                  {rangoLluvia.min !== null ? formatear(rangoLluvia.min) : "?"}–
-                  {rangoLluvia.max !== null ? formatear(rangoLluvia.max) : "?"} mm
-                </p>
-              )}
-              {!rangoLluvia && (
-                <p className="cm-vacio">
-                  La copia local de EcoCrop no trae rango de lluvia para este cultivo, así que no se puede comparar.
-                </p>
-              )}
-              {rangoLluvia && !datosPower && !actual?.error && (
-                <p className="cm-vacio">Consultando el clima de los últimos años…</p>
-              )}
-              {rangoLluvia && datosPower && sel && sel.lluvia.length === 0 && (
-                <p className="cm-vacio">No hay ciclos completos con datos de lluvia para esta ventana.</p>
-              )}
-              {rangoLluvia && sel && sel.lluvia.length > 0 && (
-                <>
-                  <GraficaLluvia datos={sel.lluvia} rango={rangoLluvia} />
-                  <ul className="cm-leyenda">
-                    <li>
-                      <span className="cm-muestra" style={{ background: C.ideal }} /> Ideal
-                    </li>
-                    <li>
-                      <span className="cm-muestra" style={{ background: C.tolera }} /> Lo que tolera
-                    </li>
-                    <li>
-                      <span className="cm-muestra" style={{ background: C.si }} /> Año dentro del ideal
-                    </li>
-                    <li>
-                      <span className="cm-muestra" style={{ background: C.cuidado }} /> Año tolerable
-                    </li>
-                    <li>
-                      <span className="cm-muestra" style={{ background: C.no }} /> Año fuera de rango
-                    </li>
-                  </ul>
-                  <p className="cm-chico">Cada barra es el total de mm que cayó en el ciclo sembrando ese año.</p>
-                </>
-              )}
-            </div>
           </section>
         )}
 
@@ -1505,18 +1611,29 @@ export default function AnalyzeMyCropsPage() {
           <summary>Cómo se decide</summary>
           <p>
             <strong>Temperatura.</strong> Cada mes del ciclo se compara con el rango de temperatura que FAO EcoCrop
-            da para el cultivo. Un año "cumple" si todos los meses de su ciclo estuvieron dentro de lo que el cultivo
-            tolera. Si eso pasó en el {Math.round(UMBRAL_SI * 100)} % de los años o más, la respuesta es sí; entre{" "}
-            {Math.round(UMBRAL_CUIDADO * 100)} % y {Math.round(UMBRAL_SI * 100)} %, con cuidado; por debajo, no. Si
-            la temperatura típica de algún mes ya queda fuera del rango, también es no. Estos porcentajes son un
-            criterio propio de esta herramienta, no un dato de FAO.
+            da para el cultivo, usando la temperatura media mensual de NASA POWER. Un año "cumple" si todos los meses
+            de su ciclo estuvieron dentro de lo que el cultivo tolera. Si eso pasó en el {Math.round(UMBRAL_SI * 100)} %
+            de los años o más, la respuesta es sí; entre {Math.round(UMBRAL_CUIDADO * 100)} % y{" "}
+            {Math.round(UMBRAL_SI * 100)} %, con cuidado; por debajo, no. Si la temperatura típica de algún mes ya
+            queda fuera del rango, también es no. Estos porcentajes son un criterio propio de esta herramienta, no un
+            dato de FAO.
           </p>
           <p>
-            <strong>Lluvia.</strong> NASA POWER entrega la lluvia como promedio diario de cada mes (mm/día). Se
-            multiplica por los días del mes y se suman todos los meses del ciclo para obtener los mm acumulados de cada
-            año, que se comparan con el rango de EcoCrop con los mismos umbrales que la temperatura. EcoCrop publica la
-            lluvia como valor para todo el ciclo del cultivo, así que en ciclos muy cortos es una aproximación. No se
-            considera riego: si llueve menos del mínimo, el cultivo podría sembrarse con riego.
+            <strong>Lluvia del ciclo.</strong> ERA5 entrega la lluvia diaria. Se suma por mes y, para cada año pasado,
+            se suman los meses del ciclo que empieza en el mes de siembra elegido. La lluvia típica (mediana) se
+            compara con el rango de lluvia de EcoCrop, que corresponde al ciclo del cultivo y no al año calendario:
+            ideal si cae en el rango óptimo, tolerable si cae en el rango absoluto, no conviene si queda fuera.
+            Además, si menos del {Math.round(UMBRAL_SI * 100)} % de los años quedó dentro de lo que tolera, el
+            resultado baja. Como el total no dice cuándo llueve, se avisa cuántos meses del ciclo típico tienen menos
+            de {MES_SECO_MM} mm (ese aviso no cambia el resultado). Si llueve menos del mínimo, el cultivo podría
+            sembrarse con riego.
+          </p>
+          <p>
+            <strong>Evaporación potencial (ET0).</strong> ERA5 también da la ET0 diaria (FAO Penman-Monteith). Se suma
+            en el ciclo y se compara con la lluvia solo como dato y aviso (cuando la lluvia cubre menos del{" "}
+            {Math.round(RATIO_ET0_AVISO * 100)} %). EcoCrop no tiene un rango de evapotranspiración y la ET0 no es la
+            demanda real del cultivo (para eso haría falta el coeficiente Kc de cada etapa), por eso no pesa en el
+            resultado.
           </p>
           <p>
             <strong>pH del suelo.</strong> Ideal si cae en el rango óptimo de EcoCrop, tolerable si cae en el rango
@@ -1524,15 +1641,18 @@ export default function AnalyzeMyCropsPage() {
           </p>
           <p>
             <strong>Resultado final.</strong> Manda el peor de los factores (ley del mínimo), no un promedio. No es un
-            pronóstico: describe lo que pasó en esos mismos meses durante los años pasados. Se usa la temperatura media
-            mensual, así que una helada o una ola de calor de pocos días no se ve. No se evalúan altitud ni otras
-            propiedades del suelo. Es una guía para orientarse: consultá a un técnico agrícola antes de decidir.
+            pronóstico: describe lo que pasó en esos mismos meses durante los años pasados. Para la temperatura se usa
+            la media mensual, así que una helada o una ola de calor de pocos días no se ve en el veredicto; si el
+            cultivo tiene temperatura letal en EcoCrop, se muestra un aviso con la mínima diaria de ERA5. No se
+            evalúan altitud ni otras propiedades del suelo. Es una guía para orientarse: consultá a un técnico
+            agrícola antes de decidir.
           </p>
           <p>
-            Datos: NASA POWER (comunidad AG, temperatura media a 2 m y precipitación corregida, grilla de baja
-            resolución: puntos cercanos dan resultados casi iguales) · Suelo: ISRIC SoilGrids (pH en agua, 0–30 cm) ·
-            Rangos y duración del ciclo: FAO EcoCrop (copia OpenCLIM; ciclo = mínimo + 1 mes, con 1 mes = 30 días) ·
-            Búsqueda de lugares: Open-Meteo · Mapa: OpenStreetMap.
+            Datos: temperatura media, NASA POWER (comunidad AG, T2M, grilla de baja resolución) · Lluvia, ET0 y mínima
+            diaria: ERA5 (ECMWF/Copernicus) servido por Open-Meteo (~25 km; en zonas de montaña un punto cercano
+            puede dar valores distintos) · Suelo: ISRIC SoilGrids (pH en agua, 0–30 cm) · Rangos y duración del ciclo:
+            FAO EcoCrop (copia OpenCLIM; ciclo = mínimo + 1 mes, con 1 mes = 30 días) · Búsqueda de lugares:
+            Open-Meteo · Mapa: OpenStreetMap.
           </p>
         </details>
       </div>

@@ -1,51 +1,117 @@
-/* ---- Dos gráficas al costado (temperatura | lluvia anual) ---- */
-.ac-par {
-  display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-  gap: 24px;
-  align-items: start;
-  margin-top: 8px;
+.cm{
+  --fondo:#eef2ea; --papel:#ffffff; --tinta:#243522; --suave:#71806d; --linea:#dfe8d7; --borde:#d5e2ca;
+  --verde:#5f8d1f; --lima:#9bd43c; --lima-osc:#203318;
+  --si:#4f8f1f; --cuidado:#bf8120; --no:#b3402a; --sin:#8a9683;
+  background:var(--fondo); color:var(--tinta); min-height:100vh; padding:28px 5vw 64px;
+  font-family:'Space Grotesk',system-ui,-apple-system,'Segoe UI',sans-serif; line-height:1.45; font-size:15px;
 }
-@media (max-width: 900px) {
-  .ac-par {
-    grid-template-columns: 1fr;
-  }
+.cm *{box-sizing:border-box}
+.cm-wrap{max-width:1180px;margin:0 auto}
+
+/* cabecera, igual que las otras páginas de módulo */
+.cm-cab{display:flex;align-items:center;justify-content:space-between;margin-bottom:30px}
+.cm-cab a{color:var(--verde);font-weight:600;text-decoration:none}
+.cm-cab a:hover{text-decoration:underline}
+.cm-sutil{color:#7a8875}
+.cm-kicker{display:block;color:#7ea52b;font:10px 'DM Mono',monospace;text-transform:uppercase;letter-spacing:.12em}
+.cm h1{font-size:clamp(28px,4vw,42px);letter-spacing:-1.5px;line-height:1.05;margin:8px 0 0;color:var(--tinta)}
+.cm-sub{color:#7a8875;margin:6px 0 0}
+
+.cm-card{background:var(--papel);border:1px solid #dfe8d7;border-radius:16px;padding:18px;box-shadow:0 4px 14px rgba(50,74,36,.06)}
+.cm-etiqueta{display:block;font-size:13px;font-weight:600;color:var(--suave);margin-bottom:6px}
+.cm select,.cm input[type=text]{
+  width:100%;font:inherit;color:var(--tinta);background:#f8faf5;border:1px solid var(--borde);border-radius:8px;padding:9px 12px;min-height:42px;
 }
-.ac-subtitulo {
-  font-size: 14px;
-  margin: 0 0 8px;
+.cm select:focus-visible,.cm input:focus-visible,.cm button:focus-visible{outline:3px solid #c7e68b;outline-offset:2px}
+
+/* fila principal: qué y cuándo · dónde · conviene */
+.cm-fila{display:grid;gap:14px;margin-top:22px}
+@media(min-width:960px){
+  .cm-fila{grid-template-columns:minmax(240px,1fr) minmax(300px,1.3fr) minmax(280px,1.15fr);align-items:stretch}
 }
 
-/* ---- Campos de texto del panel de ubicación ---- */
-.ac-campo input {
-  background: transparent;
-  border: 1px solid #1d3044;
-  border-radius: 6px;
-  color: inherit;
-  font: inherit;
-  padding: 8px 10px;
-  min-width: 0;
+.cm-meses{display:grid;grid-template-columns:repeat(6,1fr);gap:6px}
+.cm-mes{
+  font:inherit;font-size:13px;display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 0 6px;
+  background:#f8faf5;border:1px solid var(--borde);border-radius:9px;cursor:pointer;color:var(--tinta);min-height:48px;
+  transition:border-color .2s,background .2s;
 }
+.cm-mes:hover{border-color:var(--lima);background:#f0f8df}
+.cm-mes[aria-pressed=true]{border:2px solid var(--tinta);padding:7px 0 5px;font-weight:600;background:#fff}
+.cm-punto{width:11px;height:11px;border-radius:50%;background:var(--sin)}
+.cm-nota{margin:8px 0 0;color:var(--suave);font-size:13px}
 
-/* ---- Lista de resultados de búsqueda ---- */
-.ac-lista {
-  list-style: none;
-  margin: 10px 0 0;
-  padding: 0;
+.cm-ubi-cab{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.cm-ubi-cab .cm-etiqueta{margin:0}
+.cm-ubi-nombre{font-weight:600;font-size:14px}
+.cm-ubi-coord{font-size:12px;color:var(--suave)}
+.cm-buscador{position:relative;z-index:5}
+.cm-sug{
+  position:absolute;left:0;right:0;top:calc(100% + 4px);list-style:none;margin:0;padding:4px;
+  background:#fff;border:1px solid var(--borde);border-radius:10px;box-shadow:0 10px 25px rgba(35,52,29,.12);
 }
-.ac-lista button {
-  display: block;
-  width: 100%;
-  text-align: left;
-  background: transparent;
-  border: 1px solid #1d3044;
-  border-radius: 6px;
-  color: inherit;
-  cursor: pointer;
-  font: inherit;
-  margin-bottom: 4px;
-  padding: 8px 10px;
+.cm-sug button{width:100%;text-align:left;font:inherit;background:none;border:0;padding:9px 10px;border-radius:8px;cursor:pointer;min-height:42px;color:var(--tinta)}
+.cm-sug button:hover{background:#f0f8df}
+.cm-sug-info{padding:10px;color:var(--suave);font-size:14px}
+.cm-mapa{flex:1;min-height:190px;height:210px;margin-top:8px;border-radius:12px;overflow:hidden;isolation:isolate;z-index:0;border:1px solid var(--linea);cursor:crosshair;background:#e4eddc}
+.cm-mapa-error{display:flex;align-items:center;justify-content:center;padding:16px;text-align:center;cursor:default}
+.cm-mapa-pie{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px}
+.cm-mapa-pie p{margin:0;color:var(--suave);font-size:13px}
+.cm-boton{font:inherit;font-weight:700;min-height:40px;padding:0 16px;border-radius:8px;border:1px solid var(--lima);background:var(--lima);color:var(--lima-osc);cursor:pointer;transition:background .2s}
+.cm-boton:hover{background:#8cc42f}
+.cm-boton.sec{background:#fff;color:#41631d;border:1px solid #cfe5a3;font-weight:600}
+.cm-boton.sec:hover{background:#f0f8df}
+.cm-boton:disabled{opacity:.6;cursor:default}
+.cm-error{margin:0;color:var(--no);font-size:14px}
+
+/* veredicto */
+.cm-ver{border-radius:16px;padding:18px;border:1px solid transparent;border-left:8px solid var(--sin);background:#f1f4ee;display:flex;flex-direction:column;gap:8px;box-shadow:0 4px 14px rgba(50,74,36,.06)}
+.cm-ver.si{background:#e6f3cc;border-color:#cfe5a3;border-left-color:var(--si)}
+.cm-ver.cuidado{background:#fff3d9;border-color:#f0dcae;border-left-color:var(--cuidado)}
+.cm-ver.no{background:#fbe3dc;border-color:#f0c4b8;border-left-color:var(--no)}
+.cm-ver h2{font-weight:700;font-size:clamp(20px,2.4vw,24px);line-height:1.15;letter-spacing:-.5px;margin:0;color:var(--tinta)}
+.cm-ver.si h2{color:#2f4f12}.cm-ver.cuidado h2{color:#7a4f0b}.cm-ver.no h2{color:#7c2216}
+.cm-ver p{margin:0}
+.cm-ver .cm-fino{font-size:13px;color:#4f5d4a}
+.cm-factores{list-style:none;margin:2px 0 0;padding:0;display:grid;gap:6px}
+.cm-factor{
+  display:flex;align-items:center;gap:8px;font-size:14px;color:var(--tinta);
+  background:rgba(255,255,255,.7);border:1px solid rgba(36,53,34,.1);border-radius:9px;padding:7px 10px;min-height:40px;
 }
-.ac-lista button:hover {
-  border-color: #51dfad;
-}
+.cm-factor b{font-weight:600}
+.cm-factor .cm-punto{flex:none}
+
+/* panel de gráficas: del lugar (izquierda) · del mes (derecha) */
+.cm-graf{margin-top:14px}
+.cm-graf-cuerpo{display:grid;gap:26px;grid-template-columns:1fr}
+@media(min-width:960px){.cm-graf-cuerpo{grid-template-columns:minmax(360px,.95fr) 1.7fr;align-items:start}}
+.cm-lugar{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+@media(max-width:420px){.cm-lugar{grid-template-columns:1fr}}
+.cm-vert{min-width:0}
+.cm-h3{font-size:17px;font-weight:700;letter-spacing:-.3px;margin:0 0 2px;color:var(--tinta)}
+.cm-rango{font-size:12.5px;color:var(--suave);margin:0 0 10px}
+.cm-dato-grande{font-weight:700;font-size:26px;letter-spacing:-.8px;line-height:1.1;margin:8px 0 0;text-align:center}
+.cm-chico{font-size:12.5px;color:var(--suave);margin:8px 0 0}
+.cm-vacio{color:var(--suave);padding:10px 0;margin:0;font-size:14px}
+
+.cm-leyenda{display:flex;flex-wrap:wrap;gap:4px 16px;list-style:none;margin:12px 0 0;padding:0;font-size:12.5px;color:var(--suave)}
+.cm-leyenda li{display:flex;align-items:center;gap:6px}
+.cm-muestra{width:16px;height:11px;border-radius:3px;display:inline-block}
+
+.cm-mesgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:8px;margin-top:14px}
+.cm-mescard{border:1px solid var(--linea);border-radius:12px;padding:8px 10px;border-top:4px solid var(--sin);background:#fff}
+.cm-mescard b{display:block;font-weight:600;font-size:14px}
+.cm-mescard .t{font-size:20px;font-weight:700;letter-spacing:-.5px;line-height:1.2}
+.cm-mescard .e{font-size:12.5px;font-weight:600}
+.cm-mescard .a{font-size:12px;color:var(--suave)}
+
+.cm-det{margin-top:22px;border-top:1px solid var(--linea);padding-top:14px;font-size:13.5px;color:var(--suave)}
+.cm-det summary{cursor:pointer;font-weight:600;color:var(--tinta)}
+.cm-det p{margin:8px 0 0;max-width:90ch;line-height:1.6}
+.cm-cargando{color:var(--suave);padding:14px 0}
+
+/* Leaflet (cargado por CDN): evitar que los estilos globales deformen el mapa */
+.cm .leaflet-container{font:inherit;width:100%;height:100%}
+.cm .leaflet-container a{color:#5f8d1f}
+
+@media(max-width:700px){.cm{padding:20px 18px 56px}}
