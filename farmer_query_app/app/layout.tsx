@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Farmer Query · Agricultural Explorer",
-  description: "Explore climate and crop data with NASA POWER",
+  title: "Farmer Query · Explorador agrícola",
+  description: "Explora datos climáticos y de cultivo con NASA POWER",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
