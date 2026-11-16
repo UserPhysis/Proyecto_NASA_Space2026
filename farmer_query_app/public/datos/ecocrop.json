@@ -1,0 +1,315 @@
+{
+  "fuente": "FAO EcoCrop (espejo OpenCLIM)",
+  "cultivos": {
+    "Maíz": {
+      "cientifico": "Zea mays",
+      "temperatura": {
+        "min": 10,
+        "optMin": 18,
+        "optMax": 33,
+        "max": 47
+      },
+      "lluviaAnual": {
+        "min": 400,
+        "optMin": 600,
+        "optMax": 1200,
+        "max": 1800
+      },
+      "lluviaMensualAprox": {
+        "min": 126,
+        "optMin": 189,
+        "optMax": 379,
+        "max": 568
+      },
+      "ph": {
+        "min": 4.5,
+        "optMin": 5,
+        "optMax": 7,
+        "max": 8.5
+      },
+      "cicloDias": {
+        "min": 65,
+        "max": 365
+      }
+    },
+    "Frijol": {
+      "cientifico": "Phaseolus vulgaris",
+      "temperatura": {
+        "min": 7,
+        "optMin": 16,
+        "optMax": 25,
+        "max": 32
+      },
+      "lluviaAnual": {
+        "min": 300,
+        "optMin": 500,
+        "optMax": 2000,
+        "max": 4300
+      },
+      "lluviaMensualAprox": {
+        "min": 112,
+        "optMin": 187,
+        "optMax": 750,
+        "max": 1612
+      },
+      "ph": {
+        "min": 4,
+        "optMin": 5.5,
+        "optMax": 7.5,
+        "max": 9
+      },
+      "cicloDias": {
+        "min": 50,
+        "max": 270
+      }
+    },
+    "Café": {
+      "cientifico": "Coffea arabica",
+      "temperatura": {
+        "min": 10,
+        "optMin": 14,
+        "optMax": 28,
+        "max": 34
+      },
+      "lluviaAnual": {
+        "min": 750,
+        "optMin": 1400,
+        "optMax": 2300,
+        "max": 4200
+      },
+      "lluviaMensualAprox": {
+        "min": 94,
+        "optMin": 175,
+        "optMax": 288,
+        "max": 525
+      },
+      "ph": {
+        "min": 4.3,
+        "optMin": 5.5,
+        "optMax": 7,
+        "max": 8.4
+      },
+      "cicloDias": {
+        "min": 210,
+        "max": 330
+      }
+    },
+    "Caña de azúcar": {
+      "cientifico": "Saccharum officinarum",
+      "temperatura": {
+        "min": 15,
+        "optMin": 24,
+        "optMax": 37,
+        "max": 41
+      },
+      "lluviaAnual": {
+        "min": 1000,
+        "optMin": 1500,
+        "optMax": 2000,
+        "max": 5000
+      },
+      "lluviaMensualAprox": {
+        "min": 125,
+        "optMin": 188,
+        "optMax": 250,
+        "max": 625
+      },
+      "ph": {
+        "min": 4.5,
+        "optMin": 5,
+        "optMax": 8,
+        "max": 9
+      },
+      "cicloDias": {
+        "min": 210,
+        "max": 365
+      }
+    },
+    "Arroz": {
+      "cientifico": "Oryza sativa",
+      "temperatura": {
+        "min": 10,
+        "optMin": 20,
+        "optMax": 30,
+        "max": 36
+      },
+      "lluviaAnual": {
+        "min": 1000,
+        "optMin": 1500,
+        "optMax": 2000,
+        "max": 4000
+      },
+      "lluviaMensualAprox": {
+        "min": 273,
+        "optMin": 409,
+        "optMax": 545,
+        "max": 1091
+      },
+      "ph": {
+        "min": 4.5,
+        "optMin": 5.5,
+        "optMax": 7,
+        "max": 9
+      },
+      "cicloDias": {
+        "min": 80,
+        "max": 180
+      }
+    },
+    "Soya": {
+      "cientifico": "Glycine max",
+      "temperatura": {
+        "min": 10,
+        "optMin": 20,
+        "optMax": 33,
+        "max": 38
+      },
+      "lluviaAnual": {
+        "min": 450,
+        "optMin": 600,
+        "optMax": 1500,
+        "max": 1800
+      },
+      "lluviaMensualAprox": {
+        "min": 129,
+        "optMin": 171,
+        "optMax": 429,
+        "max": 514
+      },
+      "ph": {
+        "min": 4.5,
+        "optMin": 5.5,
+        "optMax": 6.5,
+        "max": 8.4
+      },
+      "cicloDias": {
+        "min": 75,
+        "max": 180
+      }
+    },
+    "Trigo": {
+      "cientifico": "Triticum aestivum",
+      "temperatura": {
+        "min": 5,
+        "optMin": 15,
+        "optMax": 23,
+        "max": 27
+      },
+      "lluviaAnual": {
+        "min": 300,
+        "optMin": 750,
+        "optMax": 900,
+        "max": 1600
+      },
+      "lluviaMensualAprox": {
+        "min": 75,
+        "optMin": 188,
+        "optMax": 225,
+        "max": 400
+      },
+      "ph": {
+        "min": 5.5,
+        "optMin": 6,
+        "optMax": 7,
+        "max": 8.5
+      },
+      "cicloDias": {
+        "min": 90,
+        "max": 250
+      }
+    },
+    "Papa": {
+      "cientifico": "Solanum tuberosum",
+      "temperatura": {
+        "min": 7,
+        "optMin": 15,
+        "optMax": 25,
+        "max": 30
+      },
+      "lluviaAnual": {
+        "min": 250,
+        "optMin": 500,
+        "optMax": 800,
+        "max": 2000
+      },
+      "lluviaMensualAprox": {
+        "min": 63,
+        "optMin": 125,
+        "optMax": 200,
+        "max": 500
+      },
+      "ph": {
+        "min": 4.2,
+        "optMin": 5,
+        "optMax": 6.2,
+        "max": 8.5
+      },
+      "cicloDias": {
+        "min": 90,
+        "max": 160
+      }
+    },
+    "Tomate": {
+      "cientifico": "Lycopersicon esculentum",
+      "temperatura": {
+        "min": 7,
+        "optMin": 20,
+        "optMax": 27,
+        "max": 35
+      },
+      "lluviaAnual": {
+        "min": 400,
+        "optMin": 600,
+        "optMax": 1300,
+        "max": 1800
+      },
+      "lluviaMensualAprox": {
+        "min": 120,
+        "optMin": 180,
+        "optMax": 390,
+        "max": 540
+      },
+      "ph": {
+        "min": 5,
+        "optMin": 5.5,
+        "optMax": 6.8,
+        "max": 7.5
+      },
+      "cicloDias": {
+        "min": 70,
+        "max": 150
+      }
+    },
+    "Yuca": {
+      "cientifico": "Manihot esculenta",
+      "temperatura": {
+        "min": 10,
+        "optMin": 20,
+        "optMax": 29,
+        "max": 35
+      },
+      "lluviaAnual": {
+        "min": 500,
+        "optMin": 1000,
+        "optMax": 1500,
+        "max": 5000
+      },
+      "lluviaMensualAprox": {
+        "min": 71,
+        "optMin": 143,
+        "optMax": 214,
+        "max": 714
+      },
+      "ph": {
+        "min": 4,
+        "optMin": 5.5,
+        "optMax": 8,
+        "max": 9
+      },
+      "cicloDias": {
+        "min": 180,
+        "max": 365
+      }
+    }
+  }
+}
