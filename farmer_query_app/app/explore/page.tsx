@@ -427,61 +427,71 @@ export default function ExplorePage() {
  
   // Inicializar el Globo 3D (globe.gl)
   // Inicializar el Globo 3D (globe.gl)
-  useEffect(() => {
-    if (!globeReady || !window.Globe || !globeContainerRef.current || globeInstanceRef.current) {
+    useEffect(() => {
+    if (!globeContainerRef.current || globeInstanceRef.current) {
       return;
     }
 
+    let isMounted = true;
+    let resizeObserver: ResizeObserver | null = null;
     const container = globeContainerRef.current;
-    
-    // Obtener dimensiones seguras evitando valores de 0px
-    const width = container.clientWidth || container.offsetWidth || window.innerWidth * 0.6;
-    const height = container.clientHeight || container.offsetHeight || 600;
 
-    const globe = window
-      .Globe()(container)
-      .backgroundColor("rgba(0,0,0,0)")
-      .showAtmosphere(true)
-      .atmosphereColor("#8eb049")
-      .atmosphereAltitude(0.16)
-      .width(width)
-      .height(height)
-      .onGlobeClick(({ lat, lng }: { lat: number; lng: number }) => {
-        setAutoRotate(false);
-        setFocusedCropId(null);
-        analizarPuntoEnGlobo(lat, lng);
+    async function initGlobe() {
+      const Globe = (await import("globe.gl")).default;
+      if (!isMounted || !container || globeInstanceRef.current) return;
+
+      // Obtener dimensiones seguras evitando valores de 0px
+      const width = container.clientWidth || container.offsetWidth || window.innerWidth * 0.6;
+      const height = container.clientHeight || container.offsetHeight || 600;
+
+      const globe = new Globe(container)
+        .backgroundColor("rgba(0,0,0,0)")
+        .showAtmosphere(true)
+        .atmosphereColor("#8eb049")
+        .atmosphereAltitude(0.16)
+        .width(width)
+        .height(height)
+        .onGlobeClick(({ lat, lng }: { lat: number; lng: number }) => {
+          setAutoRotate(false);
+          setFocusedCropId(null);
+          analizarPuntoEnGlobo(lat, lng);
+        });
+
+      // Océano liso, sin textura satelital ni relieve
+      const mat = globe.globeMaterial() as any;
+      mat.color.set(OCEAN_COLOR);
+      mat.emissive.set(OCEAN_COLOR);
+      mat.emissiveIntensity = 0.55;
+      mat.specular.set("#000000");
+      mat.shininess = 0;
+
+      // Centrar inicialmente sobre El Salvador
+      globe.pointOfView({ lat: 13.8, lng: -88.9, altitude: 2.1 }, 1000);
+
+      globe.controls().autoRotate = true;
+      globe.controls().autoRotateSpeed = 0.6;
+
+      globeInstanceRef.current = globe;
+      setGlobeReady(true);
+
+      // Observer para redimensionar el globo dinámicamente cuando el contenedor cargue su tamaño real
+      resizeObserver = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          const { width: w, height: h } = entry.contentRect;
+          if (w > 0 && h > 0 && globeInstanceRef.current) {
+            globeInstanceRef.current.width(w).height(h);
+          }
+        }
       });
 
-    // Océano liso, sin textura satelital ni relieve
-    const mat = globe.globeMaterial();
-    mat.color.set(OCEAN_COLOR);
-    mat.emissive.set(OCEAN_COLOR);
-    mat.emissiveIntensity = 0.55;
-    mat.specular.set("#000000");
-    mat.shininess = 0;
+      resizeObserver.observe(container);
+    }
 
-    // Centrar inicialmente sobre El Salvador
-    globe.pointOfView({ lat: 13.8, lng: -88.9, altitude: 2.1 }, 1000);
-
-    globe.controls().autoRotate = true;
-    globe.controls().autoRotateSpeed = 0.6;
-
-    globeInstanceRef.current = globe;
-
-    // Observer para redimensionar el globo dinámicamente cuando el contenedor cargue su tamaño real
-    const resizeObserver = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const { width: w, height: h } = entry.contentRect;
-        if (w > 0 && h > 0 && globeInstanceRef.current) {
-          globeInstanceRef.current.width(w).height(h);
-        }
-      }
-    });
-
-    resizeObserver.observe(container);
+    initGlobe();
 
     return () => {
-      resizeObserver.disconnect();
+      isMounted = false;
+      resizeObserver?.disconnect();
       try {
         globeInstanceRef.current?._destructor?.();
       } catch {
@@ -490,8 +500,8 @@ export default function ExplorePage() {
       globeInstanceRef.current = null;
       container.innerHTML = "";
     };
-  }, [globeReady]);
- 
+  }, []);
+
   // Dibujar países: fronteras para todos y relleno verde en los que cumplen
   useEffect(() => {
     if (!globeInstanceRef.current) return;
@@ -585,11 +595,8 @@ export default function ExplorePage() {
  
   return (
     <div className="exploreLayout">
-      <Script
-        src="https://unpkg.com/globe.gl"
-        strategy="afterInteractive"
-        onLoad={() => setGlobeReady(true)}
-      />
+      
+
  
       {/* Barra Superior */}
       <div className="barra">

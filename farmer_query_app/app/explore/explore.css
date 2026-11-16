@@ -74,17 +74,8 @@
   display: grid;
   grid-template-columns: 1.15fr 0.85fr;
   flex: 1;
+  min-height: 0;
   overflow: hidden;
-}
-
-@media (max-width: 960px) {
-  .splitContent {
-    grid-template-columns: 1fr;
-    overflow-y: auto;
-  }
-  .globeWrapper {
-    min-height: 420px;
-  }
 }
 
 /* Contenedor del Globo 3D */
@@ -92,6 +83,7 @@
   position: relative;
   width: 100%;
   height: 100%;
+  min-height: 500px;
   background: radial-gradient(circle at center, #eef3e6 0%, #e4e6dc 100%);
   display: flex;
   align-items: center;
@@ -102,11 +94,23 @@
 #globo3d {
   width: 100%;
   height: 100%;
+  min-height: 500px;
   cursor: grab;
 }
 
 #globo3d:active {
   cursor: grabbing;
+}
+
+@media (max-width: 960px) {
+  .splitContent {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+  .globeWrapper,
+  #globo3d {
+    min-height: 420px;
+  }
 }
 
 .globeOverlayLegend {
